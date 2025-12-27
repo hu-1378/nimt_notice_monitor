@@ -72,19 +72,42 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             """加载配置文件"""
             default_config = {
                 "sites_config": [
-                    {
-                        "id": "nimt_main",
-                        "name": "南京机电职业技术学院",
-                        "url": "http://www.nimt.edu.cn/739/list.htm",
-                        "base_url": "http://www.nimt.edu.cn",
-                        "remark": "学校主站通知公告",
-                        "enabled": True
-                    }
-                ],
-                "push_targets": {
-                    "users": [],
-                    "groups": []
-                },
+                    # 主站
+            {
+                "id": "nimt_main",
+                "name": "南京机电职业技术学院",
+                "url": "https://www.nimt.edu.cn/739/list.htm",
+                "base_url": "https://www.nimt.edu.cn",
+                "remark": "学校主站通知公告",
+                "enabled": True
+            },
+            # 教务处
+            {
+                "id": "jiaowu",
+                "name": "教务处",
+                "url": "https://www.nimt.edu.cn/jiaowu/396/list.htm",
+                "base_url": "https://www.nimt.edu.cn",
+                "remark": "教务处通知公告",
+                "enabled": True
+            },
+            # 信息工程系
+            {
+                "id": "xinxi",
+                "name": "信息工程系",
+                "url": "https://www.nimt.edu.cn/xinxi/tzgg/list.htm",
+                "base_url": "https://www.nimt.edu.cn",
+                "remark": "信息工程系通知公告",
+                "enabled": True
+            },
+            # 蓝岛创客空间
+            {
+                "id": "landao",
+                "name": "蓝岛创客空间",
+                "url": "https://www.nimt.edu.cn/landao/19517/list.htm",
+                "base_url": "https://www.nimt.edu.cn",
+                "remark": "蓝岛创客空间通知公告",
+                "enabled": True
+            },
                 "check_interval": 180
             }
 
