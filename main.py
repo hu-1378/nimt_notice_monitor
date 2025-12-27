@@ -37,7 +37,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         "nimt_notice_monitor",
         "AstrBot",
         "南京机电职业技术学院通知监控插件",
-        "2.1.1"
+        "2.1.2"
     )
     class NJIMTNoticeMonitor(Star):
         def __init__(self, context: Context):
@@ -124,8 +124,8 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     "enable_change_detection": True,
                     "change_check_day": 0,
                     "change_check_time": "21:00",
-                    "timeout": 30,  # 增加超时时间
-                    "max_retries": 3  # 增加重试次数
+                    "timeout": 30,
+                    "max_retries": 3
                 }
             }
 
@@ -530,9 +530,10 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
         # ==================== 新增教务系统功能 ====================
 
-        async def fetch_jwc(self, url: str, method: str = "GET", data: Dict = None, 
-                           cookies: Dict = None, headers: Dict = None, retry_count: int = 0) -> Dict:
-            """请求教务系统API"""
+        async def fetch_jwc_with_cookies(self, url: str, method: str = "GET", data: Dict = None, 
+                                        cookies: Dict = None, headers: Dict = None, 
+                                        allow_redirects: bool = True) -> Dict:
+            """请求教务系统API，支持cookie管理和重定向"""
             base_url = self.jwc_config.get("base_url", "https://nimt.jw.chaoxing.com")
             full_url = base_url + url if url.startswith("/") else url
             
@@ -553,44 +554,73 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             max_retries = self.jwc_config.get("max_retries", 3)
 
             try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                # 创建支持cookie的session
+                jar = aiohttp.CookieJar(unsafe=True)
+                async with aiohttp.ClientSession(timeout=timeout, cookie_jar=jar) as session:
+                    
+                    # 如果有传入的cookies，手动设置到session中
+                    if cookies:
+                        for name, value in cookies.items():
+                            session.cookie_jar.update_cookies({name: value})
+                    
                     if method.upper() == "GET":
-                        async with session.get(full_url, headers=default_headers, cookies=cookies) as response:
+                        async with session.get(full_url, headers=default_headers, allow_redirects=allow_redirects) as response:
                             response_text = await response.text()
                             status = response.status
+                            response_cookies = session.cookie_jar.filter_cookies(full_url)
                     else:
-                        async with session.post(full_url, headers=default_headers, data=data, cookies=cookies) as response:
+                        async with session.post(full_url, headers=default_headers, data=data, allow_redirects=allow_redirects) as response:
                             response_text = await response.text()
                             status = response.status
+                            response_cookies = session.cookie_jar.filter_cookies(full_url)
 
                     # 记录请求日志
                     self.log_request(None, full_url, data, response_text, status)
                     
-                    if status == 200:
+                    # 处理cookie，转换为字典
+                    cookie_dict = {}
+                    for cookie in response_cookies.values():
+                        cookie_dict[cookie.key] = cookie.value
+                    
+                    if status == 200 or status == 302:
+                        # 302是重定向，对登录来说是成功的
                         try:
-                            return json.loads(response_text)
+                            # 尝试解析JSON
+                            json_data = json.loads(response_text)
+                            return {
+                                "ret": 0,
+                                "msg": "success",
+                                "data": json_data,
+                                "cookies": cookie_dict,
+                                "status": status
+                            }
                         except:
                             # 如果不是JSON，返回原始文本
-                            return {"ret": 0, "msg": "success", "data": response_text}
-                    elif status in [302, 303, 307, 308]:  # 重定向
-                        # 检查是否重定向到成功页面
-                        if "location" in response.headers:
-                            location = response.headers["location"]
-                            if "main.html" in location or "index" in location:
-                                return {"ret": 0, "msg": "登录成功", "data": {"redirect": location}}
-                        return {"ret": -1, "msg": f"重定向: {status}", "data": None}
+                            return {
+                                "ret": 0,
+                                "msg": "success",
+                                "data": response_text,
+                                "cookies": cookie_dict,
+                                "status": status
+                            }
                     else:
-                        if retry_count < max_retries:
-                            await asyncio.sleep(1)  # 等待1秒后重试
-                            return await self.fetch_jwc(url, method, data, cookies, headers, retry_count + 1)
-                        return {"ret": -1, "msg": f"请求失败: {status}", "data": None}
+                        return {
+                            "ret": -1,
+                            "msg": f"请求失败: {status}",
+                            "data": None,
+                            "cookies": None,
+                            "status": status
+                        }
                         
             except Exception as e:
-                if retry_count < max_retries:
-                    await asyncio.sleep(1)
-                    return await self.fetch_jwc(url, method, data, cookies, headers, retry_count + 1)
                 logger.error(f"请求教务系统失败 {full_url}: {e}")
-                return {"ret": -1, "msg": f"网络错误: {str(e)}", "data": None}
+                return {
+                    "ret": -1,
+                    "msg": f"网络错误: {str(e)}",
+                    "data": None,
+                    "cookies": None,
+                    "status": 0
+                }
 
         def log_request(self, student_id: str, url: str, request_data: Dict, response_data: str, status_code: int):
             """记录请求日志"""
@@ -627,89 +657,103 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"记录请求日志失败: {e}")
 
-        async def get_login_page(self):
-            """获取登录页面，提取必要信息"""
+        async def login_jwc_real(self, student_id: str, password: str) -> Dict[str, Any]:
+            """真正的登录函数，处理302重定向和Cookie"""
             try:
                 login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
-                html = await self.fetch_page(login_url)
                 
-                if not html:
-                    return None
+                # 先获取登录页面，获取初始cookie
+                logger.info("获取登录页面，获取初始cookie...")
+                get_result = await self.fetch_jwc_with_cookies("/admin/login", method="GET")
                 
-                # 从页面中提取关键信息
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # 提取公钥（如果需要）
-                public_key = None
-                script_tags = soup.find_all('script')
-                for script in script_tags:
-                    if script.string and 'publicKey' in script.string:
-                        # 简单提取公钥
-                        match = re.search(r'publicKey\s*=\s*["\']([^"\']+)["\']', script.string)
-                        if match:
-                            public_key = match.group(1)
-                            break
-                
-                return {
-                    "public_key": public_key,
-                    "html": html
-                }
-            except Exception as e:
-                logger.error(f"获取登录页面失败: {e}")
-                return None
-
-        async def login_jwc_simple(self, student_id: str, password: str) -> Dict[str, Any]:
-            """简化版登录方法"""
-            try:
-                # 构建登录数据（简化版，可能不需要RSA加密）
+                # 构建登录数据
                 login_data = {
                     "username": student_id,
-                    "password": password,  # 直接使用明文密码
+                    "password": password,  # 使用原始密码（未加密）
                     "vcode": "",
                     "jcaptchaCode": "",
                     "rememberMe": ""
                 }
                 
-                logger.info(f"尝试登录，学号: {student_id}")
+                logger.info(f"提交登录请求，学号: {student_id}")
                 
-                # 发送登录请求
-                result = await self.fetch_jwc("/admin/login", method="POST", data=login_data)
+                # 发送登录请求，不自动跟随重定向
+                result = await self.fetch_jwc_with_cookies(
+                    "/admin/login", 
+                    method="POST", 
+                    data=login_data,
+                    allow_redirects=False  # 不自动重定向，让我们自己处理
+                )
                 
-                logger.info(f"登录响应: {result}")
+                logger.info(f"登录响应状态: {result.get('status')}")
+                logger.info(f"登录响应cookies: {result.get('cookies')}")
                 
-                if result.get("ret") == 0:
-                    # 登录成功
-                    return {
-                        "success": True,
-                        "student_id": student_id,
-                        "message": "登录成功"
-                    }
-                else:
-                    error_msg = result.get("msg", "登录失败")
-                    if "账号或密码错误" in error_msg or "密码错误" in error_msg:
+                # 检查是否登录成功
+                status = result.get("status")
+                if status == 302:
+                    # 302重定向表示登录成功
+                    cookies = result.get("cookies", {})
+                    
+                    # 验证是否获得了关键cookie
+                    if cookies and any(key in cookies for key in ['username', 'puid', 'jw_uf']):
+                        logger.info("登录成功！获得有效cookies")
+                        return {
+                            "success": True,
+                            "student_id": student_id,
+                            "cookies": cookies,
+                            "message": "登录成功"
+                        }
+                    else:
+                        logger.warning("登录返回302但未获得关键cookies")
+                        return {
+                            "success": False,
+                            "error": "登录失败：未获得有效会话"
+                        }
+                elif status == 200:
+                    # 200状态码，检查响应内容
+                    data = result.get("data", "")
+                    if isinstance(data, str) and "账号或密码错误" in data:
                         return {"success": False, "error": "账号或密码错误"}
-                    elif "验证码" in error_msg:
+                    elif isinstance(data, str) and "验证码" in data:
                         return {"success": False, "error": "需要验证码，请稍后再试"}
                     else:
-                        return {"success": False, "error": f"登录失败: {error_msg}"}
+                        # 可能是其他错误
+                        return {"success": False, "error": f"登录失败，服务器返回: {data[:100]}"}
+                else:
+                    error_msg = result.get("msg", "登录失败")
+                    return {"success": False, "error": f"登录失败: {error_msg} (状态码: {status})"}
                         
             except Exception as e:
                 logger.error(f"登录教务系统失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
 
+        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
+            """主登录函数"""
+            logger.info(f"开始登录流程，学号: {student_id}")
+            
+            # 尝试真实登录
+            result = await self.login_jwc_real(student_id, password)
+            
+            if not result.get("success"):
+                # 如果失败，尝试更直接的方法
+                logger.info("标准登录失败，尝试备用方法...")
+                result = await self.login_jwc_direct(student_id, password)
+            
+            return result
+
         async def login_jwc_direct(self, student_id: str, password: str) -> Dict[str, Any]:
-            """直接登录方法，模拟浏览器行为"""
+            """备用登录方法：直接POST请求"""
             try:
                 login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
                 
                 # 构建完整的表单数据
-                form_data = urllib.parse.urlencode({
+                form_data = {
                     "username": student_id,
-                    "password": password,
+                    "password": password,  # 使用原始密码
                     "vcode": "",
                     "jcaptchaCode": "",
                     "rememberMe": ""
-                })
+                }
                 
                 headers = {
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -724,69 +768,75 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 
                 logger.info(f"尝试直接登录，学号: {student_id}")
                 
-                # 发送POST请求
-                response_text = await self.fetch_page(login_url, method="POST", data=form_data, headers=headers)
+                # 创建session
+                jar = aiohttp.CookieJar(unsafe=True)
+                timeout = aiohttp.ClientTimeout(total=self.jwc_config.get("timeout", 30))
                 
-                # 检查响应
-                if not response_text:
-                    return {"success": False, "error": "登录请求失败"}
-                
-                # 检查是否登录成功
-                if "账号或密码错误" in response_text:
-                    return {"success": False, "error": "账号或密码错误"}
-                elif "验证码" in response_text:
-                    return {"success": False, "error": "需要验证码，请稍后再试"}
-                elif "main.html" in response_text or "index" in response_text:
-                    # 登录成功
-                    return {
-                        "success": True,
-                        "student_id": student_id,
-                        "message": "登录成功"
-                    }
-                else:
-                    # 尝试从响应中提取更多信息
-                    soup = BeautifulSoup(response_text, 'html.parser')
-                    error_msg = soup.find('div', class_='error-msg')
-                    if error_msg:
-                        return {"success": False, "error": error_msg.get_text(strip=True)}
+                async with aiohttp.ClientSession(timeout=timeout, cookie_jar=jar) as session:
+                    # 先GET一次登录页面，获取初始cookie
+                    async with session.get(login_url, headers=headers) as response:
+                        await response.text()
                     
-                    # 检查是否有登录成功的迹象
-                    title = soup.find('title')
-                    if title and ("教务系统" in title.text or "首页" in title.text):
-                        return {
-                            "success": True,
-                            "student_id": student_id,
-                            "message": "登录成功"
-                        }
-                    
-                    return {"success": False, "error": "登录失败，未知错误"}
-                    
+                    # 发送POST请求，不自动跟随重定向
+                    async with session.post(
+                        login_url, 
+                        data=form_data, 
+                        headers=headers,
+                        allow_redirects=False  # 不自动重定向
+                    ) as response:
+                        status = response.status
+                        response_cookies = session.cookie_jar.filter_cookies(login_url)
+                        
+                        # 处理cookie，转换为字典
+                        cookie_dict = {}
+                        for cookie in response_cookies.values():
+                            cookie_dict[cookie.key] = cookie.value
+                        
+                        logger.info(f"直接登录响应状态: {status}")
+                        logger.info(f"直接登录cookies: {cookie_dict}")
+                        
+                        if status == 302:
+                            # 检查是否有重定向到成功页面
+                            location = response.headers.get("location", "")
+                            if "main.html" in location or "admin" in location:
+                                # 登录成功
+                                return {
+                                    "success": True,
+                                    "student_id": student_id,
+                                    "cookies": cookie_dict,
+                                    "message": "登录成功"
+                                }
+                            else:
+                                return {"success": False, "error": f"登录失败，重定向到: {location}"}
+                        elif status == 200:
+                            # 读取响应内容检查错误
+                            response_text = await response.text()
+                            if "账号或密码错误" in response_text:
+                                return {"success": False, "error": "账号或密码错误"}
+                            else:
+                                return {"success": False, "error": "登录失败，未知原因"}
+                        else:
+                            return {"success": False, "error": f"登录失败，状态码: {status}"}
+                            
             except Exception as e:
                 logger.error(f"直接登录失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
 
-        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
-            """主登录函数，尝试多种方法"""
-            # 先尝试简单方法
-            result = await self.login_jwc_simple(student_id, password)
-            
-            if not result.get("success") and "账号或密码错误" in result.get("error", ""):
-                # 如果简单方法失败，尝试直接方法
-                logger.info("简单登录失败，尝试直接登录...")
-                result = await self.login_jwc_direct(student_id, password)
-            
-            return result
-
-        async def get_user_info(self) -> Dict[str, Any]:
-            """获取用户信息"""
+        async def get_user_info_with_cookies(self, cookies: Dict) -> Dict[str, Any]:
+            """使用cookies获取用户信息"""
             try:
-                # 通过获取当前周次信息来获取用户信息
+                # 使用cookies请求当前周次信息
                 today = datetime.now().strftime("%Y-%m-%d")
-                result = await self.fetch_jwc(f"/admin/getDayBz?rq={today}")
+                result = await self.fetch_jwc_with_cookies(
+                    f"/admin/getDayBz?rq={today}",
+                    method="GET",
+                    cookies=cookies
+                )
                 
                 if result.get("ret") == 0 and result.get("data"):
-                    if isinstance(result["data"], dict) and "xlrq" in result["data"]:
-                        xlrq = result["data"]["xlrq"]
+                    data = result.get("data")
+                    if isinstance(data, dict) and "xlrq" in data:
+                        xlrq = data["xlrq"]
                         return {
                             "student_id": xlrq.get("currentUserName"),
                             "user_id": xlrq.get("currentUserId"),
@@ -794,51 +844,88 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                             "academic_year": xlrq.get("xnxqh"),
                             "department_id": xlrq.get("currentDepartmentId")
                         }
+                    else:
+                        # 尝试直接解析
+                        try:
+                            if isinstance(data, str):
+                                data_json = json.loads(data)
+                                if "xlrq" in data_json:
+                                    xlrq = data_json["xlrq"]
+                                    return {
+                                        "student_id": xlrq.get("currentUserName"),
+                                        "user_id": xlrq.get("currentUserId"),
+                                        "role_id": xlrq.get("currentRoleId"),
+                                        "academic_year": xlrq.get("xnxqh"),
+                                        "department_id": xlrq.get("currentDepartmentId")
+                                    }
+                        except:
+                            pass
                 return None
             except Exception as e:
                 logger.error(f"获取用户信息失败: {e}")
                 return None
 
-        async def get_current_week(self, date_str: str = None) -> Dict[str, Any]:
-            """获取当前周次信息"""
+        async def get_current_week_with_cookies(self, cookies: Dict, date_str: str = None) -> Dict[str, Any]:
+            """使用cookies获取当前周次信息"""
             try:
                 if not date_str:
                     date_str = datetime.now().strftime("%Y-%m-%d")
                 
-                result = await self.fetch_jwc(f"/admin/getDayBz?rq={date_str}")
+                result = await self.fetch_jwc_with_cookies(
+                    f"/admin/getDayBz?rq={date_str}",
+                    method="GET",
+                    cookies=cookies
+                )
                 
                 if result.get("ret") == 0 and result.get("data"):
-                    if isinstance(result["data"], dict):
-                        return result["data"].get("xlrq", {})
+                    data = result.get("data")
+                    if isinstance(data, dict):
+                        return data.get("xlrq", {})
+                    elif isinstance(data, str):
+                        try:
+                            data_json = json.loads(data)
+                            return data_json.get("xlrq", {})
+                        except:
+                            return {}
                 return None
             except Exception as e:
                 logger.error(f"获取周次信息失败: {e}")
                 return None
 
-        async def get_week_days(self, week: int) -> List[Dict[str, Any]]:
-            """获取周次对应的星期"""
+        async def get_week_days_with_cookies(self, cookies: Dict, week: int) -> List[Dict[str, Any]]:
+            """使用cookies获取周次对应的星期"""
             try:
-                result = await self.fetch_jwc("/admin/getXqByZc", method="POST", data={"zc": week})
+                result = await self.fetch_jwc_with_cookies(
+                    "/admin/getXqByZc",
+                    method="POST",
+                    data={"zc": week},
+                    cookies=cookies
+                )
                 
                 if result.get("ret") == 0 and result.get("data"):
-                    return result["data"]
+                    return result.get("data", [])
                 return []
             except Exception as e:
                 logger.error(f"获取星期信息失败: {e}")
                 return []
 
-        async def get_course_table(self, week: int, student_id: str = None) -> Dict[str, Any]:
-            """获取课表"""
+        async def get_course_table_with_cookies(self, cookies: Dict, week: int, student_id: str = None) -> Dict[str, Any]:
+            """使用cookies获取课表"""
             try:
-                result = await self.fetch_jwc("/admin/getXsdSykb", method="POST", data={"type": 1, "zc": week})
+                result = await self.fetch_jwc_with_cookies(
+                    "/admin/getXsdSykb",
+                    method="POST",
+                    data={"type": 1, "zc": week},
+                    cookies=cookies
+                )
                 
                 if result.get("ret") == 0 and result.get("data"):
                     # 处理课表数据
-                    course_data = result["data"]
+                    course_data = result.get("data", {})
                     
                     # 提取学术周信息
                     academic_year = None
-                    week_info = await self.get_current_week()
+                    week_info = await self.get_current_week_with_cookies(cookies)
                     if week_info:
                         academic_year = week_info.get("xnxqh")
                     
@@ -1006,70 +1093,80 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"保存课程到数据库失败: {e}")
 
-        async def get_today_courses(self, student_id: str, push_type: str = "全天课表") -> List[Dict]:
-            """获取今天课程"""
+        async def save_user_cookies(self, qq_id: str, student_id: str, cookies: Dict):
+            """保存用户cookies到数据库"""
             try:
-                # 获取当前日期和周次
-                today = datetime.now()
-                week_info = await self.get_current_week(today.strftime("%Y-%m-%d"))
-                
-                if not week_info:
-                    return []
-                
-                week = week_info.get("zc", 1)
-                day_of_week = week_info.get("xqbh", today.weekday() + 1)  # 1-7
-                
-                # 从数据库获取课程
                 conn = sqlite3.connect(str(self.db_file))
                 cursor = conn.cursor()
                 
-                # 查询今天课程
+                # 更新用户绑定表中的cookie字段
                 cursor.execute(
                     """
-                    SELECT * FROM course_schedules 
-                    WHERE student_id = ? AND week = ? AND day_of_week = ?
-                    ORDER BY section_code
+                    UPDATE user_bindings 
+                    SET cookie = ?, last_login = ?
+                    WHERE qq_id = ? AND student_id = ?
                     """,
-                    (student_id, week, day_of_week)
+                    (json.dumps(cookies), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), qq_id, student_id)
                 )
                 
-                rows = cursor.fetchall()
+                # 保存到登录会话表
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO login_sessions 
+                    (student_id, cookies, last_login, expires_at, status)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        student_id,
+                        json.dumps(cookies),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                        "active"
+                    )
+                )
+                
+                conn.commit()
                 conn.close()
-                
-                # 如果没有课程，尝试从API获取
-                if not rows:
-                    await self.update_course_table(student_id, week)
-                    return await self.get_today_courses(student_id, push_type)
-                
-                # 转换为字典列表
-                columns = [description[0] for description in cursor.description]
-                courses = [dict(zip(columns, row)) for row in rows]
-                
-                # 根据推送类型过滤课程
-                if push_type == "下午课表":
-                    # 只返回下午及晚上的课程（节次5-11）
-                    courses = [c for c in courses if c.get("section_code") and int(c["section_code"]) >= 5]
-                # 如果是全天课表，返回所有课程
-                
-                return courses
+                logger.info(f"成功保存用户{student_id}的cookies")
                 
             except Exception as e:
-                logger.error(f"获取今天课程失败: {e}")
-                return []
+                logger.error(f"保存用户cookies失败: {e}")
 
-        async def update_course_table(self, student_id: str, week: int = None):
-            """更新课表数据"""
+        async def get_user_cookies(self, student_id: str) -> Dict:
+            """从数据库获取用户cookies"""
+            try:
+                conn = sqlite3.connect(str(self.db_file))
+                cursor = conn.cursor()
+                
+                cursor.execute(
+                    "SELECT cookies FROM login_sessions WHERE student_id = ? AND status = 'active'",
+                    (student_id,)
+                )
+                
+                result = cursor.fetchone()
+                conn.close()
+                
+                if result and result[0]:
+                    return json.loads(result[0])
+                return {}
+                
+            except Exception as e:
+                logger.error(f"获取用户cookies失败: {e}")
+                return {}
+
+        async def update_course_table_with_cookies(self, student_id: str, cookies: Dict, week: int = None):
+            """使用cookies更新课表数据"""
             try:
                 # 如果没有指定周次，获取当前周次
                 if not week:
-                    week_info = await self.get_current_week()
+                    week_info = await self.get_current_week_with_cookies(cookies)
                     if week_info:
                         week = week_info.get("zc", 1)
                     else:
                         week = 1
                 
                 # 获取课表数据
-                course_result = await self.get_course_table(week, student_id)
+                course_result = await self.get_course_table_with_cookies(cookies, week, student_id)
                 
                 if course_result.get("success"):
                     courses = course_result.get("courses", [])
@@ -1107,8 +1204,51 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     qq_id, student_id, name = user
                     
                     try:
-                        # 获取今天课程
-                        courses = await self.get_today_courses(student_id, push_type)
+                        # 获取用户cookies
+                        cookies = await self.get_user_cookies(student_id)
+                        
+                        if not cookies:
+                            logger.warning(f"用户{student_id}没有有效的cookies，跳过推送")
+                            continue
+                        
+                        # 获取当前周次信息
+                        week_info = await self.get_current_week_with_cookies(cookies)
+                        if not week_info:
+                            logger.warning(f"无法获取用户{student_id}的周次信息")
+                            continue
+                        
+                        week = week_info.get("zc", 1)
+                        day_of_week = week_info.get("xqbh", 1)
+                        
+                        # 从数据库获取今天课程
+                        conn = sqlite3.connect(str(self.db_file))
+                        cursor = conn.cursor()
+                        
+                        cursor.execute(
+                            """
+                            SELECT * FROM course_schedules 
+                            WHERE student_id = ? AND week = ? AND day_of_week = ?
+                            ORDER BY section_code
+                            """,
+                            (student_id, week, day_of_week)
+                        )
+                        
+                        rows = cursor.fetchall()
+                        conn.close()
+                        
+                        if not rows:
+                            # 如果没有课程数据，尝试更新
+                            await self.update_course_table_with_cookies(student_id, cookies, week)
+                            continue
+                        
+                        # 转换为字典列表
+                        columns = [description[0] for description in cursor.description]
+                        courses = [dict(zip(columns, row)) for row in rows]
+                        
+                        # 根据推送类型过滤课程
+                        if push_type == "下午课表":
+                            # 只返回下午及晚上的课程（节次5-11）
+                            courses = [c for c in courses if c.get("section_code") and int(c["section_code"]) >= 5]
                         
                         if not courses:
                             continue
@@ -1160,10 +1300,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         if morning_courses or afternoon_courses or evening_courses:
                             await self.context.send_message(f"private:{qq_id}", message)
                             logger.info(f"向用户{qq_id}推送课表成功")
-                        else:
-                            if push_type == "全天课表":
-                                await self.context.send_message(f"private:{qq_id}", 
-                                                               f"📅 {today.month}月{today.day}日（星期{weekday_str}）\n\n✅ 今日无课程安排")
                             
                     except Exception as e:
                         logger.error(f"向用户{qq_id}推送课表失败: {e}")
@@ -1220,8 +1356,12 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     qq_id, student_id = user
                     
                     try:
-                        # 更新最新课表
-                        await self.update_course_table(student_id)
+                        # 获取用户cookies
+                        cookies = await self.get_user_cookies(student_id)
+                        
+                        if cookies:
+                            # 更新最新课表
+                            await self.update_course_table_with_cookies(student_id, cookies)
                         
                     except Exception as e:
                         logger.error(f"检查用户{student_id}课程变动失败: {e}")
@@ -1427,36 +1567,52 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             if login_result.get("success"):
                 # 绑定成功，保存信息
                 try:
-                    # AES加密密码（这里简化处理，实际应该使用AES加密）
-                    # 由于时间关系，这里只做base64编码
+                    # 获取cookies
+                    cookies = login_result.get("cookies", {})
+                    
+                    # 保存加密密码（实际应该使用AES加密，这里简化）
                     encoded_password = base64.b64encode(password.encode()).decode()
                     
                     conn = sqlite3.connect(str(self.db_file))
                     cursor = conn.cursor()
                     
+                    # 保存用户绑定信息
                     cursor.execute(
                         """
-                        INSERT INTO user_bindings (qq_id, student_id, password, name, bind_time)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO user_bindings (qq_id, student_id, password, name, cookie, bind_time)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (qq_id, student_id, encoded_password, "", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        (
+                            qq_id, 
+                            student_id, 
+                            encoded_password, 
+                            "", 
+                            json.dumps(cookies), 
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        )
                     )
                     
                     conn.commit()
                     conn.close()
                     
+                    # 保存cookies到会话表
+                    await self.save_user_cookies(qq_id, student_id, cookies)
+                    
                     # 更新课表数据
                     yield event.plain_result("验证成功，正在更新课表数据...")
-                    await self.update_course_table(student_id)
+                    success = await self.update_course_table_with_cookies(student_id, cookies)
                     
-                    yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
+                    if success:
+                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
+                    else:
+                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n注意：课表数据更新失败，请稍后使用 /更新课表 手动更新。")
                     
                 except Exception as e:
                     logger.error(f"保存绑定信息失败: {e}")
                     yield event.plain_result(f"绑定失败: {str(e)}")
             else:
                 error_msg = login_result.get("error", "绑定失败")
-                yield event.plain_result(f"❌ {error_msg}\n请检查学号和密码是否正确。\n\n提示：请确保密码正确，注意大小写和特殊字符。")
+                yield event.plain_result(f"❌ {error_msg}\n请检查学号和密码是否正确。")
 
         @filter.command("解绑教务")
         async def cmd_unbind_jwc(self, event: AstrMessageEvent):
@@ -1475,13 +1631,16 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     yield event.plain_result("您尚未绑定教务系统")
                     return
                 
+                student_id = existing[0]
+                
                 cursor.execute("DELETE FROM user_bindings WHERE qq_id = ?", (qq_id,))
-                cursor.execute("DELETE FROM course_schedules WHERE student_id = ?", (existing[0],))
+                cursor.execute("DELETE FROM course_schedules WHERE student_id = ?", (student_id,))
+                cursor.execute("DELETE FROM login_sessions WHERE student_id = ?", (student_id,))
                 
                 conn.commit()
                 conn.close()
                 
-                yield event.plain_result("✅ 解绑成功！已清除您的绑定信息和课表数据。")
+                yield event.plain_result("✅ 解绑成功！已清除您的绑定信息、课表数据和登录会话。")
                 
             except Exception as e:
                 logger.error(f"解绑失败: {e}")
@@ -1497,7 +1656,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 cursor = conn.cursor()
                 
                 cursor.execute(
-                    "SELECT student_id, name, class_name, bind_time FROM user_bindings WHERE qq_id = ?",
+                    "SELECT student_id, name, class_name, bind_time, cookie FROM user_bindings WHERE qq_id = ?",
                     (qq_id,)
                 )
                 
@@ -1508,7 +1667,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     yield event.plain_result("您尚未绑定教务系统")
                     return
                 
-                student_id, name, class_name, bind_time = binding
+                student_id, name, class_name, bind_time, cookie_json = binding
                 
                 response = f"📋 绑定信息\n\n"
                 response += f"QQ号：{qq_id}\n"
@@ -1517,7 +1676,22 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     response += f"姓名：{name}\n"
                 if class_name:
                     response += f"班级：{class_name}\n"
-                response += f"绑定时间：{bind_time}\n\n"
+                response += f"绑定时间：{bind_time}\n"
+                
+                # 检查是否有有效的cookies
+                has_cookies = False
+                if cookie_json:
+                    try:
+                        cookies = json.loads(cookie_json)
+                        if cookies:
+                            has_cookies = True
+                            cookie_count = len(cookies)
+                            response += f"会话状态：✅ 有效（{cookie_count}个cookies）\n"
+                    except:
+                        pass
+                
+                if not has_cookies:
+                    response += "会话状态：❌ 无效或过期\n"
                 
                 # 检查是否有课表数据
                 conn = sqlite3.connect(str(self.db_file))
@@ -1530,9 +1704,9 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 conn.close()
                 
                 if count > 0:
-                    response += f"📅 已存储 {count} 条课程记录\n"
+                    response += f"\n📅 已存储 {count} 条课程记录\n"
                 else:
-                    response += f"📅 暂无课表数据，请使用 /更新课表 获取\n"
+                    response += f"\n📅 暂无课表数据，请使用 /更新课表 获取\n"
                 
                 yield event.plain_result(response)
                 
@@ -1563,9 +1737,15 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             student_id = binding[0]
             
             try:
+                # 获取用户cookies
+                cookies = await self.get_user_cookies(student_id)
+                
+                if not cookies:
+                    yield event.plain_result("您的登录会话已过期，请重新绑定或使用 /更新课表 刷新")
+                    return
+                
                 # 获取当前周次
-                today = datetime.now()
-                week_info = await self.get_current_week(today.strftime("%Y-%m-%d"))
+                week_info = await self.get_current_week_with_cookies(cookies)
                 
                 if not week_info:
                     yield event.plain_result("无法获取周次信息，请稍后再试")
@@ -1577,6 +1757,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 # 确定要查询的周次
                 if week is None:
                     # 如果是周六或周日，查看下周课表
+                    today = datetime.now()
                     if today.weekday() >= 5:  # 5=周六, 6=周日
                         query_week = current_week + 1
                     else:
@@ -1604,7 +1785,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 # 如果没有数据，尝试从API获取
                 if not courses:
                     yield event.plain_result("正在获取课表数据，请稍候...")
-                    success = await self.update_course_table(student_id, query_week)
+                    success = await self.update_course_table_with_cookies(student_id, cookies, query_week)
                     
                     if success:
                         # 重新查询
@@ -1627,7 +1808,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     return
                 
                 # 获取该周的日期信息
-                week_days = await self.get_week_days(query_week)
+                week_days = await self.get_week_days_with_cookies(cookies, query_week)
                 week_days_map = {day.get("xq"): day.get("date") for day in week_days}
                 
                 # 按星期分组课程
@@ -1738,13 +1919,48 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             
             student_id = binding[0]
             
+            # 获取用户cookies
+            cookies = await self.get_user_cookies(student_id)
+            
+            if not cookies:
+                # 尝试重新登录
+                conn = sqlite3.connect(str(self.db_file))
+                cursor = conn.cursor()
+                cursor.execute("SELECT password FROM user_bindings WHERE qq_id = ? AND student_id = ?", (qq_id, student_id))
+                result = cursor.fetchone()
+                conn.close()
+                
+                if not result:
+                    yield event.plain_result("找不到您的登录信息，请重新绑定")
+                    return
+                
+                # 解码密码
+                try:
+                    encoded_password = result[0]
+                    password = base64.b64decode(encoded_password).decode()
+                    
+                    yield event.plain_result("会话过期，正在重新登录...")
+                    login_result = await self.login_jwc(student_id, password)
+                    
+                    if not login_result.get("success"):
+                        yield event.plain_result("重新登录失败，请重新绑定")
+                        return
+                    
+                    cookies = login_result.get("cookies", {})
+                    await self.save_user_cookies(qq_id, student_id, cookies)
+                    
+                except Exception as e:
+                    logger.error(f"重新登录失败: {e}")
+                    yield event.plain_result("重新登录失败，请重新绑定")
+                    return
+            
             yield event.plain_result("正在更新课表数据，请稍候...")
             
             try:
-                success = await self.update_course_table(student_id, week)
+                success = await self.update_course_table_with_cookies(student_id, cookies, week)
                 
                 if success:
-                    week_info = await self.get_current_week()
+                    week_info = await self.get_current_week_with_cookies(cookies)
                     current_week = week_info.get("zc", 1) if week_info else 1
                     
                     if week:
@@ -1777,14 +1993,45 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             student_id, name = binding
             
             try:
-                # 获取今天课程
-                courses = await self.get_today_courses(student_id, "全天课表")
+                # 获取用户cookies
+                cookies = await self.get_user_cookies(student_id)
                 
-                if not courses:
-                    today = datetime.now()
-                    weekday_str = ["一", "二", "三", "四", "五", "六", "日"][today.weekday()]
-                    yield event.plain_result(f"📅 {today.month}月{today.day}日（星期{weekday_str}）\n\n✅ 今日无课程安排")
+                if not cookies:
+                    yield event.plain_result("您的登录会话已过期，请使用 /更新课表 刷新")
                     return
+                
+                # 获取当前周次
+                week_info = await self.get_current_week_with_cookies(cookies)
+                if not week_info:
+                    yield event.plain_result("无法获取周次信息，请稍后再试")
+                    return
+                
+                week = week_info.get("zc", 1)
+                day_of_week = week_info.get("xqbh", 1)
+                
+                # 从数据库获取课程
+                conn = sqlite3.connect(str(self.db_file))
+                cursor = conn.cursor()
+                
+                cursor.execute(
+                    """
+                    SELECT * FROM course_schedules 
+                    WHERE student_id = ? AND week = ? AND day_of_week = ?
+                    ORDER BY section_code
+                    """,
+                    (student_id, week, day_of_week)
+                )
+                
+                rows = cursor.fetchall()
+                conn.close()
+                
+                if not rows:
+                    yield event.plain_result("今天没有课程安排")
+                    return
+                
+                # 转换为字典列表
+                columns = [description[0] for description in cursor.description]
+                courses = [dict(zip(columns, row)) for row in rows]
                 
                 # 构建消息
                 today = datetime.now()
@@ -1837,13 +2084,28 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             """测试教务系统登录"""
             yield event.plain_result("正在测试登录，请稍候...")
             
-            # 尝试多种登录方法
+            # 尝试登录
             login_result = await self.login_jwc(student_id, password)
             
             if login_result.get("success"):
+                cookies = login_result.get("cookies", {})
+                cookie_count = len(cookies)
+                
                 response = f"✅ 登录成功！\n\n"
                 response += f"学号：{student_id}\n"
-                response += f"提示信息：{login_result.get('message', '登录成功')}\n\n"
+                response += f"获得cookies：{cookie_count}个\n"
+                response += f"关键cookies："
+                
+                # 显示关键cookies
+                important_keys = ['username', 'puid', 'jw_uf', 'initPass', 'defaultPass']
+                for key in important_keys:
+                    if key in cookies:
+                        value = cookies[key]
+                        if len(value) > 20:
+                            value = value[:20] + "..."
+                        response += f"\n  {key}: {value}"
+                
+                response += f"\n\n提示信息：{login_result.get('message', '登录成功')}\n\n"
                 response += "您可以使用 /绑定教务 学号 密码 来绑定账号"
                 
                 yield event.plain_result(response)
