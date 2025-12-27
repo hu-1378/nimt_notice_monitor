@@ -37,7 +37,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         "nimt_notice_monitor",
         "AstrBot",
         "南京机电职业技术学院通知监控插件",
-        "2.1.2"
+        "2.2.0"
     )
     class NJIMTNoticeMonitor(Star):
         def __init__(self, context: Context):
@@ -54,6 +54,11 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             self.push_targets = self.config.get("push_targets", {"users": [], "groups": []})
             self.check_interval = self.config.get("check_interval", 180)
             
+            # RSA公钥用于密码加密
+            self.rsa_public_key = """-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC9zpr1gSa3gBnHLeDxw6DuPtnLC9HI8JOQrBbFV3ZkX0V92klvJDwS5YuZ810ZJL8MWED0gRSigS5YvXcQMyxizpN3IV9qhrlb48nI6mua1Xv75J9FxejEWA/kYlkkElwmXbyEMr1eGbYFTko40k82diw7k/xU4PaLnjFgQveSiQIDAQAB
+-----END PUBLIC KEY-----"
+            
             # 新增教务系统配置
             self.jwc_config = self.config.get("jwc_config", {
                 "base_url": "https://nimt.jw.chaoxing.com",
@@ -63,7 +68,13 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     {"hour": 12, "minute": 0, "type": "下午课表"}
                 ],
                 "enable_course_push": True,
-                "course_check_interval": 1440
+                "course_check_interval": 1440,
+                "enable_change_detection": True,
+                "change_check_day": 0,
+                "change_check_time": "21:00",
+                "timeout": 30,
+                "max_retries": 3,
+                "use_rsa_encryption": True  # 新增：是否使用RSA加密
             })
 
             self.init_database()
@@ -125,7 +136,8 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     "change_check_day": 0,
                     "change_check_time": "21:00",
                     "timeout": 30,
-                    "max_retries": 3
+                    "max_retries": 3,
+                    "use_rsa_encryption": True
                 }
             }
 
@@ -137,6 +149,11 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         for key, value in default_config.items():
                             if key not in config:
                                 config[key] = value
+                            elif isinstance(value, dict):
+                                # 合并嵌套配置
+                                for sub_key, sub_value in value.items():
+                                    if sub_key not in config[key]:
+                                        config[key][sub_key] = sub_value
                         return config
                 except Exception as e:
                     logger.error(f"加载配置文件失败: {e}")
@@ -313,6 +330,24 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 logger.warning("未找到调度器，定时任务功能不可用")
             except Exception as e:
                 logger.error(f"启动调度器失败: {e}")
+
+        # ==================== RSA加密相关方法 ====================
+        
+        def rsa_encrypt_password(self, password: str) -> str:
+            """使用RSA加密密码"""
+            try:
+                import rsa
+                pub_key = rsa.PublicKey.load_pkcs1_openssl_pem(self.rsa_public_key.encode())
+                encrypted = rsa.encrypt(password.encode(), pub_key)
+                return base64.b64encode(encrypted).decode()
+            except ImportError:
+                logger.error("需要rsa库，请安装: pip install rsa")
+                # 降级方案：返回base64编码的密码
+                return base64.b64encode(password.encode()).decode()
+            except Exception as e:
+                logger.error(f"RSA加密失败: {e}")
+                # 降级方案：返回base64编码的密码
+                return base64.b64encode(password.encode()).decode()
 
         # ==================== 原有通知监控功能 ====================
 
@@ -657,46 +692,44 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"记录请求日志失败: {e}")
 
-        async def login_jwc_real(self, student_id: str, password: str) -> Dict[str, Any]:
-            """真正的登录函数，处理302重定向和Cookie"""
+        async def login_jwc_rsa(self, student_id: str, password: str) -> Dict[str, Any]:
+            """使用RSA加密的登录方法"""
             try:
-                login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
+                # 加密密码
+                encrypted_password = self.rsa_encrypt_password(password)
                 
-                # 先获取登录页面，获取初始cookie
-                logger.info("获取登录页面，获取初始cookie...")
-                get_result = await self.fetch_jwc_with_cookies("/admin/login", method="GET")
+                login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
                 
                 # 构建登录数据
                 login_data = {
-                    "username": student_id,
-                    "password": password,  # 使用原始密码（未加密）
-                    "vcode": "",
-                    "jcaptchaCode": "",
-                    "rememberMe": ""
+                    'username': student_id,
+                    'password': encrypted_password,
+                    'vcode': '',
+                    'jcaptchaCode': '',
+                    'rememberMe': ''
                 }
                 
-                logger.info(f"提交登录请求，学号: {student_id}")
+                logger.info(f"使用RSA加密登录，学号: {student_id}")
                 
-                # 发送登录请求，不自动跟随重定向
+                # 发送登录请求
                 result = await self.fetch_jwc_with_cookies(
-                    "/admin/login", 
-                    method="POST", 
+                    self.jwc_config['login_url'],
+                    method="POST",
                     data=login_data,
-                    allow_redirects=False  # 不自动重定向，让我们自己处理
+                    allow_redirects=False
                 )
                 
-                logger.info(f"登录响应状态: {result.get('status')}")
-                logger.info(f"登录响应cookies: {result.get('cookies')}")
+                status = result.get('status')
+                cookies = result.get('cookies', {})
+                
+                logger.info(f"RSA登录响应状态: {status}")
+                logger.info(f"RSA登录cookies: {list(cookies.keys()) if cookies else '空'}")
                 
                 # 检查是否登录成功
-                status = result.get("status")
                 if status == 302:
                     # 302重定向表示登录成功
-                    cookies = result.get("cookies", {})
-                    
-                    # 验证是否获得了关键cookie
                     if cookies and any(key in cookies for key in ['username', 'puid', 'jw_uf']):
-                        logger.info("登录成功！获得有效cookies")
+                        logger.info("RSA登录成功！获得有效cookies")
                         return {
                             "success": True,
                             "student_id": student_id,
@@ -704,42 +737,44 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                             "message": "登录成功"
                         }
                     else:
-                        logger.warning("登录返回302但未获得关键cookies")
-                        return {
-                            "success": False,
-                            "error": "登录失败：未获得有效会话"
-                        }
-                elif status == 200:
-                    # 200状态码，检查响应内容
-                    data = result.get("data", "")
-                    if isinstance(data, str) and "账号或密码错误" in data:
-                        return {"success": False, "error": "账号或密码错误"}
-                    elif isinstance(data, str) and "验证码" in data:
-                        return {"success": False, "error": "需要验证码，请稍后再试"}
-                    else:
-                        # 可能是其他错误
-                        return {"success": False, "error": f"登录失败，服务器返回: {data[:100]}"}
-                else:
-                    error_msg = result.get("msg", "登录失败")
-                    return {"success": False, "error": f"登录失败: {error_msg} (状态码: {status})"}
+                        # 即使没有关键cookie，也可能是登录成功了
+                        logger.warning("RSA登录返回302但未获得关键cookies，尝试访问主页验证")
                         
+                        # 尝试访问主页验证
+                        test_result = await self.fetch_jwc_with_cookies(
+                            "/admin/main",
+                            method="GET",
+                            cookies=cookies
+                        )
+                        
+                        if test_result.get('status') == 200:
+                            logger.info("验证成功，可以访问主页")
+                            return {
+                                "success": True,
+                                "student_id": student_id,
+                                "cookies": cookies,
+                                "message": "登录成功"
+                            }
+                        else:
+                            return {"success": False, "error": "登录失败：未获得有效会话"}
+                elif status == 200:
+                    data = result.get("data", "")
+                    if isinstance(data, str):
+                        if "账号或密码错误" in data:
+                            return {"success": False, "error": "账号或密码错误"}
+                        elif "验证码" in data:
+                            return {"success": False, "error": "需要验证码，请稍后再试"}
+                        else:
+                            # 返回响应文本供调试
+                            return {"success": False, "error": f"登录失败，服务器返回: {data[:200]}"}
+                    else:
+                        return {"success": False, "error": "登录失败：未知错误"}
+                else:
+                    return {"success": False, "error": f"登录失败: 状态码 {status}"}
+                    
             except Exception as e:
-                logger.error(f"登录教务系统失败: {e}")
+                logger.error(f"RSA登录失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
-
-        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
-            """主登录函数"""
-            logger.info(f"开始登录流程，学号: {student_id}")
-            
-            # 尝试真实登录
-            result = await self.login_jwc_real(student_id, password)
-            
-            if not result.get("success"):
-                # 如果失败，尝试更直接的方法
-                logger.info("标准登录失败，尝试备用方法...")
-                result = await self.login_jwc_direct(student_id, password)
-            
-            return result
 
         async def login_jwc_direct(self, student_id: str, password: str) -> Dict[str, Any]:
             """备用登录方法：直接POST请求"""
@@ -749,7 +784,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 # 构建完整的表单数据
                 form_data = {
                     "username": student_id,
-                    "password": password,  # 使用原始密码
+                    "password": password,
                     "vcode": "",
                     "jcaptchaCode": "",
                     "rememberMe": ""
@@ -782,7 +817,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         login_url, 
                         data=form_data, 
                         headers=headers,
-                        allow_redirects=False  # 不自动重定向
+                        allow_redirects=False
                     ) as response:
                         status = response.status
                         response_cookies = session.cookie_jar.filter_cookies(login_url)
@@ -821,6 +856,31 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"直接登录失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
+
+        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
+            """主登录函数 - 优先使用RSA加密登录"""
+            logger.info(f"开始登录流程，学号: {student_id}")
+            
+            use_rsa = self.jwc_config.get("use_rsa_encryption", True)
+            
+            if use_rsa:
+                # 首先尝试RSA加密登录
+                result = await self.login_jwc_rsa(student_id, password)
+                
+                if result.get("success"):
+                    return result
+                else:
+                    logger.info("RSA登录失败，尝试直接登录...")
+            
+            # 如果RSA登录失败或禁用RSA，尝试直接登录
+            direct_result = await self.login_jwc_direct(student_id, password)
+            
+            if direct_result.get("success"):
+                return direct_result
+            else:
+                # 返回错误信息
+                error_msg = direct_result.get("error", "登录失败")
+                return {"success": False, "error": error_msg}
 
         async def get_user_info_with_cookies(self, cookies: Dict) -> Dict[str, Any]:
             """使用cookies获取用户信息"""
@@ -1019,10 +1079,10 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                                 "classroom": classroom,
                                 "building": building,
                                 "room_number": room_number,
-                                "course_type": "理论",  # 默认为理论课
+                                "course_type": "理论",
                                 "hours": hours,
                                 "is_practice": False,
-                                "week_range": "",  # 需要从其他接口获取
+                                "week_range": "",
                                 "course_hash": course_hash
                             }
                             
@@ -1036,7 +1096,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
         def get_section_time(self, section_code: str) -> Dict[str, str]:
             """根据节次编码获取时间"""
-            # 节次时间映射表
             time_mapping = {
                 "1": {"start_time": "08:00", "end_time": "08:45", "period": "第1节"},
                 "2": {"start_time": "08:50", "end_time": "09:35", "period": "第2节"},
@@ -1570,7 +1629,11 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     # 获取cookies
                     cookies = login_result.get("cookies", {})
                     
-                    # 保存加密密码（实际应该使用AES加密，这里简化）
+                    # 获取用户信息
+                    user_info = await self.get_user_info_with_cookies(cookies)
+                    name = user_info.get("student_id", "") if user_info else ""
+                    
+                    # 保存加密密码
                     encoded_password = base64.b64encode(password.encode()).decode()
                     
                     conn = sqlite3.connect(str(self.db_file))
@@ -1579,16 +1642,16 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     # 保存用户绑定信息
                     cursor.execute(
                         """
-                        INSERT INTO user_bindings (qq_id, student_id, password, name, cookie, bind_time)
+                        INSERT INTO user_bindings (qq_id, student_id, password, name, bind_time, cookie)
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
                             qq_id, 
                             student_id, 
                             encoded_password, 
-                            "", 
-                            json.dumps(cookies), 
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            name, 
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            json.dumps(cookies)
                         )
                     )
                     
@@ -1603,16 +1666,16 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     success = await self.update_course_table_with_cookies(student_id, cookies)
                     
                     if success:
-                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
+                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n姓名：{name}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
                     else:
-                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n注意：课表数据更新失败，请稍后使用 /更新课表 手动更新。")
+                        yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n姓名：{name}\n\n注意：课表数据更新失败，请稍后使用 /更新课表 手动更新。")
                     
                 except Exception as e:
                     logger.error(f"保存绑定信息失败: {e}")
-                    yield event.plain_result(f"绑定失败: {str(e)}")
+                    yield event.plain_result(f"绑定成功但保存信息失败: {str(e)}\n请稍后使用 /更新课表 刷新数据。")
             else:
                 error_msg = login_result.get("error", "绑定失败")
-                yield event.plain_result(f"❌ {error_msg}\n请检查学号和密码是否正确。")
+                yield event.plain_result(f"❌ {error_msg}\n\n可能的原因：\n1. 学号或密码错误\n2. 需要验证码（请稍后再试）\n3. 网络问题\n\n请检查后重试。")
 
         @filter.command("解绑教务")
         async def cmd_unbind_jwc(self, event: AstrMessageEvent):
