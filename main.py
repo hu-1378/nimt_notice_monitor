@@ -70,9 +70,8 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
         def load_config(self) -> Dict[str, Any]:
             """加载配置文件"""
-            default_config = {
-                "sites_config": [
-                    # 主站
+            "sites_config": [
+            # 主站
             {
                 "id": "nimt_main",
                 "name": "南京机电职业技术学院",
@@ -108,8 +107,38 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 "remark": "蓝岛创客空间通知公告",
                 "enabled": True
             },
-                "check_interval": 180
-            }
+            # 其他网站可以根据需要添加
+            # {
+            #     "id": "jixie",
+            #     "name": "机械工程系",
+            #     "url": "https://www.nimt.edu.cn/jixie/166/list.htm",
+            #     "base_url": "https://www.nimt.edu.cn",
+            #     "remark": "机械工程系通知公告",
+            #     "enabled": True
+            # },
+            # {
+            #     "id": "dianzi",
+            #     "name": "电子工程系",
+            #     "url": "https://www.nimt.edu.cn/dianzi/181/list.htm",
+            #     "base_url": "https://www.nimt.edu.cn",
+            #     "remark": "电子工程系通知公告",
+            #     "enabled": True
+            # },
+            # {
+            #     "id": "zidonghua",
+            #     "name": "自动化工程系",
+            #     "url": "https://www.nimt.edu.cn/zidonghua/204/list.htm",
+            #     "base_url": "https://www.nimt.edu.cn",
+            #     "remark": "自动化工程系通知公告",
+            #     "enabled": True
+            # }
+        ],
+        "push_targets": {
+            "users": [],
+            "groups": []
+        },
+        "check_interval": 180
+    }
 
             if self.config_file.exists():
                 try:
