@@ -1,0 +1,27 @@
+{
+  "sites_config": {
+    "description": "网站监控配置",
+    "type": "text",
+    "hint": "JSON格式的网站配置列表，每个网站包含id、name、url、base_url、remark等字段",
+    "default": "[{\"id\": \"nimt_main\", \"name\": \"南京机电职业技术学院\", \"url\": \"http://www.nimt.edu.cn/739/list.htm\", \"base_url\": \"http://www.nimt.edu.cn\", \"remark\": \"学校主站通知公告\", \"enabled\": true}]",
+    "editor_mode": true,
+    "editor_language": "json",
+    "editor_theme": "vs-dark"
+  },
+  "push_targets": {
+    "description": "推送目标配置",
+    "type": "text",
+    "hint": "JSON格式的推送目标，包含users（用户列表）和groups（群组列表）",
+    "default": "{\"users\": [], \"groups\": []}",
+    "editor_mode": true,
+    "editor_language": "json",
+    "editor_theme": "vs-dark"
+  },
+  "check_interval": {
+    "description": "检查间隔（分钟）",
+    "type": "int",
+    "hint": "定时检查新通知的时间间隔，单位为分钟",
+    "default": 180,
+    "min": 5
+  }
+}
