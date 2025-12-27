@@ -1434,6 +1434,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 response += f"绑定时间：{bind_time}\n\n"
                 
                 # 检查是否有课表数据
+                conn = sqlite3.connect(str(self.db_file))
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT COUNT(*) FROM course_schedules WHERE student_id = ?",
@@ -1513,7 +1514,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 )
                 
                 courses = cursor.fetchall()
-                conn.close()
                 
                 # 如果没有数据，尝试从API获取
                 if not courses:
@@ -1521,10 +1521,24 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     success = await self.update_course_table(student_id, query_week)
                     
                     if success:
-                        return await self.cmd_course_table(event, query_week)
-                    else:
-                        yield event.plain_result("获取课表数据失败，请稍后再试")
-                        return
+                        # 重新查询
+                        cursor.execute(
+                            """
+                            SELECT day_of_week, section_code, section_name, course_name, course_short, 
+                                   teacher, classroom, start_time, end_time
+                            FROM course_schedules 
+                            WHERE student_id = ? AND academic_year = ? AND week = ?
+                            ORDER BY day_of_week, section_code
+                            """,
+                            (student_id, academic_year, query_week)
+                        )
+                        courses = cursor.fetchall()
+                
+                conn.close()
+                
+                if not courses:
+                    yield event.plain_result("获取课表数据失败，请稍后再试")
+                    return
                 
                 # 获取该周的日期信息
                 week_days = await self.get_week_days(query_week)
