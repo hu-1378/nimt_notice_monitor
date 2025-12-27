@@ -52,7 +52,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             self.sites_config = self.config.get("sites_config", [])
             self.push_targets = self.config.get("push_targets", {"users": [], "groups": []})
             self.check_interval = self.config.get("check_interval", 180)
-
+            
             # 新增教务系统配置
             self.jwc_config = self.config.get("jwc_config", {
                 "base_url": "https://nimt.jw.chaoxing.com",
@@ -221,7 +221,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"定时检查失败: {e}")
 
-        async def fetch_page(self, url: str, method: str = "GET", data: Dict = None,
+        async def fetch_page(self, url: str, method: str = "GET", data: Dict = None, 
                            cookies: Dict = None, headers: Dict = None) -> str:
             """通用请求函数"""
             default_headers = {
@@ -232,12 +232,12 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1"
             }
-
+            
             if headers:
                 default_headers.update(headers)
 
             timeout = aiohttp.ClientTimeout(total=self.jwc_config.get("timeout", 30))
-
+            
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     if method.upper() == "GET":
@@ -425,13 +425,13 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             try:
                 base_url = self.jwc_config.get("base_url", "https://nimt.jw.chaoxing.com")
                 login_url = f"{base_url}{self.jwc_config.get('login_url', '/admin/login')}"
-
+                
                 # 首先访问登录页面获取初始cookie
                 async with aiohttp.ClientSession() as session:
                     # 第一次请求获取初始cookie
                     async with session.get(login_url) as response:
                         initial_cookies = session.cookie_jar.filter_cookies(login_url)
-
+                    
                     # 准备登录数据(不加密,直接使用原始密码)
                     login_data = {
                         'username': student_id,
@@ -440,14 +440,14 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         'jcaptchaCode': '',
                         'rememberMe': ''
                     }
-
+                    
                     headers = {
                         'Content-Type': 'application/x-www-form-urlencoded',
                         'Origin': base_url,
                         'Referer': login_url,
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                     }
-
+                    
                     # 发送登录请求,不自动跟随重定向
                     async with session.post(
                         login_url,
@@ -456,16 +456,16 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         allow_redirects=False  # 不自动重定向
                     ) as response:
                         status = response.status
-
+                        
                         # 获取cookies
                         cookies = session.cookie_jar.filter_cookies(login_url)
                         cookie_dict = {}
                         for key, cookie in cookies.items():
                             cookie_dict[key] = cookie.value
-
+                        
                         logger.info(f"登录响应状态: {status}")
                         logger.info(f"获得cookies: {list(cookie_dict.keys())}")
-
+                        
                         if status == 302:
                             # 302重定向表示登录成功
                             # 验证cookies
@@ -491,7 +491,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                                 return {"success": False, "error": "登录失败,未知原因"}
                         else:
                             return {"success": False, "error": f"登录失败,状态码: {status}"}
-
+                            
             except Exception as e:
                 logger.error(f"登录失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
@@ -501,12 +501,12 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             try:
                 base_url = self.jwc_config.get("base_url", "https://nimt.jw.chaoxing.com")
                 test_url = f"{base_url}/admin/main"
-
+                
                 async with aiohttp.ClientSession() as session:
                     # 设置cookies
                     for key, value in cookies.items():
                         session.cookie_jar.update_cookies({key: value})
-
+                    
                     async with session.get(test_url) as response:
                         if response.status == 200:
                             return True
@@ -683,27 +683,27 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         async def cmd_test_login(self, event: AstrMessageEvent, student_id: str, password: str):
             """测试教务系统登录"""
             yield event.plain_result("正在测试登录,请稍候...")
-
+            
             # 尝试登录
             login_result = await self.login_jwc_simple(student_id, password)
-
+            
             if login_result.get("success"):
                 cookies = login_result.get("cookies", {})
                 cookie_count = len(cookies)
-
+                
                 response = f"✅ 登录成功!\n\n"
                 response += f"学号: {student_id}\n"
                 response += f"获得cookies: {cookie_count}个\n"
-
+                
                 # 测试连接
                 test_result = await self.test_jwc_connection(cookies)
                 if test_result:
                     response += f"连接测试: ✅ 有效\n\n"
                 else:
                     response += f"连接测试: ⚠️ 可能存在问题\n\n"
-
+                
                 response += "关键cookies: "
-
+                
                 # 显示关键cookies
                 important_keys = ['username', 'puid', 'jw_uf', 'initPass', 'defaultPass']
                 for key in important_keys:
@@ -712,9 +712,9 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         if len(value) > 20:
                             value = value[:20] + "..."
                         response += f"\n  {key}: {value}"
-
+                
                 response += f"\n\n提示信息: {login_result.get('message', '登录成功')}"
-
+                
                 yield event.plain_result(response)
             else:
                 error_msg = login_result.get("error", "登录失败")
@@ -724,38 +724,38 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         async def cmd_bind_jwc(self, event: AstrMessageEvent, student_id: str, password: str):
             """绑定教务系统账号"""
             qq_id = event.get_sender_id()
-
+            
             # 检查是否已绑定
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
             cursor.execute("SELECT student_id FROM user_bindings WHERE qq_id = ?", (qq_id,))
             existing = cursor.fetchone()
-
+            
             if existing:
                 conn.close()
                 yield event.plain_result("您已经绑定过教务系统,如需重新绑定请先使用 /解绑教务")
                 return
-
+            
             conn.close()
-
+            
             # 尝试登录验证
             yield event.plain_result("正在验证账号密码,请稍候...")
-
+            
             # 尝试登录
             login_result = await self.login_jwc_simple(student_id, password)
-
+            
             if login_result.get("success"):
                 # 绑定成功,保存信息
                 try:
                     # 获取cookies
                     cookies = login_result.get("cookies", {})
-
+                    
                     # 保存加密密码
                     encoded_password = base64.b64encode(password.encode()).decode()
-
+                    
                     conn = sqlite3.connect(str(self.db_file))
                     cursor = conn.cursor()
-
+                    
                     # 保存用户绑定信息
                     cursor.execute(
                         """
@@ -763,19 +763,19 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         VALUES (?, ?, ?, ?, ?)
                         """,
                         (
-                            qq_id,
-                            student_id,
-                            encoded_password,
+                            qq_id, 
+                            student_id, 
+                            encoded_password, 
                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             json.dumps(cookies)
                         )
                     )
-
+                    
                     conn.commit()
                     conn.close()
-
+                    
                     yield event.plain_result(f"✅ 绑定成功!\n学号: {student_id}\n\n已保存登录信息.")
-
+                    
                 except Exception as e:
                     logger.error(f"保存绑定信息失败: {e}")
                     yield event.plain_result(f"登录成功但保存信息失败: {str(e)}")
@@ -787,28 +787,28 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         async def cmd_unbind_jwc(self, event: AstrMessageEvent):
             """解绑教务系统账号"""
             qq_id = event.get_sender_id()
-
+            
             try:
                 conn = sqlite3.connect(str(self.db_file))
                 cursor = conn.cursor()
-
+                
                 cursor.execute("SELECT student_id FROM user_bindings WHERE qq_id = ?", (qq_id,))
                 existing = cursor.fetchone()
-
+                
                 if not existing:
                     conn.close()
                     yield event.plain_result("您尚未绑定教务系统")
                     return
-
+                
                 student_id = existing[0]
-
+                
                 cursor.execute("DELETE FROM user_bindings WHERE qq_id = ?", (qq_id,))
-
+                
                 conn.commit()
                 conn.close()
-
+                
                 yield event.plain_result("✅ 解绑成功!已清除您的绑定信息.")
-
+                
             except Exception as e:
                 logger.error(f"解绑失败: {e}")
                 yield event.plain_result(f"解绑失败: {str(e)}")
@@ -817,32 +817,32 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         async def cmd_my_binding(self, event: AstrMessageEvent):
             """查看我的绑定信息"""
             qq_id = event.get_sender_id()
-
+            
             try:
                 conn = sqlite3.connect(str(self.db_file))
                 cursor = conn.cursor()
-
+                
                 cursor.execute(
                     "SELECT student_id, bind_time FROM user_bindings WHERE qq_id = ?",
                     (qq_id,)
                 )
-
+                
                 binding = cursor.fetchone()
                 conn.close()
-
+                
                 if not binding:
                     yield event.plain_result("您尚未绑定教务系统")
                     return
-
+                
                 student_id, bind_time = binding
-
+                
                 response = f"📋 绑定信息\n\n"
                 response += f"QQ号: {qq_id}\n"
                 response += f"学号: {student_id}\n"
                 response += f"绑定时间: {bind_time}\n"
-
+                
                 yield event.plain_result(response)
-
+                
             except Exception as e:
                 logger.error(f"查询绑定信息失败: {e}")
                 yield event.plain_result(f"查询失败: {str(e)}")
