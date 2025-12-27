@@ -36,7 +36,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         "nimt_notice_monitor",
         "AstrBot",
         "南京机电职业技术学院通知监控插件",
-        "2.0.3"
+        "2.0.4"
     )
     class NJIMTNoticeMonitor(Star):
         """南京机电通知监控插件"""
@@ -470,8 +470,9 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 logger.error(f"查看通知失败: {e}")
                 yield event.plain_result(f"查询失败: {str(e)}")
 
+        # 修正命令组定义
         @filter.command_group("nimt")
-        async def nimt_group(self):
+        def nimt_group(self):
             """南京机电通知监控插件管理命令组"""
             pass
 
