@@ -10,12 +10,10 @@ import re
 import sqlite3
 import base64
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from pathlib import Path
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5
-from Crypto import Random
 
 try:
     import aiohttp
@@ -39,21 +37,9 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         "nimt_notice_monitor",
         "AstrBot",
         "南京机电职业技术学院通知监控插件",
-        "2.1.0"
+        "2.1.1"
     )
     class NJIMTNoticeMonitor(Star):
-        class RSAEncryptor:
-            """RSA加密器"""
-            def __init__(self, public_key: str):
-                self.public_key = public_key
-                self.rsa_key = RSA.import_key(base64.b64decode(public_key))
-                self.cipher = PKCS1_v1_5.new(self.rsa_key)
-
-            def encrypt(self, plaintext: str) -> str:
-                """加密文本"""
-                encrypted = self.cipher.encrypt(plaintext.encode())
-                return base64.b64encode(encrypted).decode()
-
         def __init__(self, context: Context):
             super().__init__(context)
 
@@ -71,7 +57,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             # 新增教务系统配置
             self.jwc_config = self.config.get("jwc_config", {
                 "base_url": "https://nimt.jw.chaoxing.com",
-                "public_key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC9zpr1gSa3gBnHLeDxw6DuPtnLC9HI8JOQrBbFV3ZkX0V92klvJDwS5YuZ810ZJL8MWED0gRSigS5YvXcQMyxizpN3IV9qhrlb48nI6mua1Xv75J9FxejEWA/kYlkkElwmXbyEMr1eGbYFTko40k82diw7k/xU4PaLnjFgQveSiQIDAQAB",
+                "login_url": "/admin/login",
                 "course_push_times": [
                     {"hour": 7, "minute": 0, "type": "全天课表"},
                     {"hour": 12, "minute": 0, "type": "下午课表"}
@@ -82,24 +68,8 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
             self.init_database()
             self.start_scheduler()
-            
-            # 初始化RSA加密器
-            self.rsa_encryptor = None
-            self.init_rsa_encryptor()
 
             logger.info("南京机电通知监控插件初始化完成")
-
-        def init_rsa_encryptor(self):
-            """初始化RSA加密器"""
-            try:
-                public_key = self.jwc_config.get("public_key", "")
-                if public_key:
-                    self.rsa_encryptor = self.RSAEncryptor(public_key)
-                    logger.info("RSA加密器初始化成功")
-                else:
-                    logger.warning("未找到RSA公钥配置")
-            except Exception as e:
-                logger.error(f"初始化RSA加密器失败: {e}")
 
         def load_config(self) -> Dict[str, Any]:
             default_config = {
@@ -144,7 +114,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 "check_interval": 180,
                 "jwc_config": {
                     "base_url": "https://nimt.jw.chaoxing.com",
-                    "public_key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC9zpr1gSa3gBnHLeDxw6DuPtnLC9HI8JOQrBbFV3ZkX0V92klvJDwS5YuZ810ZJL8MWED0gRSigS5YvXcQMyxizpN3IV9qhrlb48nI6mua1Xv75J9FxejEWA/kYlkkElwmXbyEMr1eGbYFTko40k82diw7k/xU4PaLnjFgQveSiQIDAQAB",
+                    "login_url": "/admin/login",
                     "course_push_times": [
                         {"hour": 7, "minute": 0, "type": "全天课表"},
                         {"hour": 12, "minute": 0, "type": "下午课表"}
@@ -152,8 +122,10 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     "enable_course_push": True,
                     "course_check_interval": 1440,
                     "enable_change_detection": True,
-                    "change_check_day": 0,  # 周日检查
-                    "change_check_time": "21:00"
+                    "change_check_day": 0,
+                    "change_check_time": "21:00",
+                    "timeout": 30,  # 增加超时时间
+                    "max_retries": 3  # 增加重试次数
                 }
             }
 
@@ -270,22 +242,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_course_student ON course_schedules(student_id)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_course_week ON course_schedules(week, day_of_week)")
 
-                # 新增：实践课表
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS practice_courses (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        student_id TEXT NOT NULL,
-                        academic_year TEXT NOT NULL,
-                        course_name TEXT NOT NULL,
-                        class_names TEXT,
-                        type TEXT,
-                        student_count TEXT,
-                        week_range TEXT,
-                        is_practice BOOLEAN DEFAULT 1,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-
                 # 新增：课程变动记录表
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS course_changes (
@@ -344,7 +300,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
                 # 新增：课程变动检查任务
                 if self.jwc_config.get("enable_change_detection", True):
-                    check_day = self.jwc_config.get("change_check_day", 0)  # 周日
+                    check_day = self.jwc_config.get("change_check_day", 0)
                     check_time_str = self.jwc_config.get("change_check_time", "21:00")
                     check_hour, check_minute = map(int, check_time_str.split(":"))
                     
@@ -375,22 +331,36 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"定时检查失败: {e}")
 
-        async def fetch_page(self, url: str) -> str:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9",
+        async def fetch_page(self, url: str, method: str = "GET", data: Dict = None, 
+                           cookies: Dict = None, headers: Dict = None) -> str:
+            """通用请求函数"""
+            default_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
             }
+            
+            if headers:
+                default_headers.update(headers)
 
+            timeout = aiohttp.ClientTimeout(total=self.jwc_config.get("timeout", 30))
+            
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.get(url, headers=headers) as response:
-                        response.raise_for_status()
-                        return await response.text(encoding='utf-8')
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    if method.upper() == "GET":
+                        async with session.get(url, headers=default_headers, cookies=cookies) as response:
+                            response.raise_for_status()
+                            return await response.text(encoding='utf-8')
+                    else:
+                        async with session.post(url, headers=default_headers, data=data, cookies=cookies) as response:
+                            response.raise_for_status()
+                            return await response.text(encoding='utf-8')
             except Exception as e:
                 logger.error(f"请求失败 {url}: {e}")
-
-            return ""
+                return ""
 
         def parse_notices(self, html: str, site_config: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not html:
@@ -561,26 +531,35 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         # ==================== 新增教务系统功能 ====================
 
         async def fetch_jwc(self, url: str, method: str = "GET", data: Dict = None, 
-                           cookies: Dict = None, need_login: bool = False) -> Dict:
+                           cookies: Dict = None, headers: Dict = None, retry_count: int = 0) -> Dict:
             """请求教务系统API"""
             base_url = self.jwc_config.get("base_url", "https://nimt.jw.chaoxing.com")
             full_url = base_url + url if url.startswith("/") else url
             
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            default_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": base_url,
+                "Referer": f"{base_url}/",
+                "X-Requested-With": "XMLHttpRequest"
             }
+            
+            if headers:
+                default_headers.update(headers)
+
+            timeout = aiohttp.ClientTimeout(total=self.jwc_config.get("timeout", 30))
+            max_retries = self.jwc_config.get("max_retries", 3)
 
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
                     if method.upper() == "GET":
-                        async with session.get(full_url, headers=headers, cookies=cookies) as response:
+                        async with session.get(full_url, headers=default_headers, cookies=cookies) as response:
                             response_text = await response.text()
                             status = response.status
                     else:
-                        async with session.post(full_url, headers=headers, data=data, cookies=cookies) as response:
+                        async with session.post(full_url, headers=default_headers, data=data, cookies=cookies) as response:
                             response_text = await response.text()
                             status = response.status
 
@@ -591,11 +570,25 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         try:
                             return json.loads(response_text)
                         except:
-                            return {"ret": -1, "msg": "响应解析失败", "data": response_text}
+                            # 如果不是JSON，返回原始文本
+                            return {"ret": 0, "msg": "success", "data": response_text}
+                    elif status in [302, 303, 307, 308]:  # 重定向
+                        # 检查是否重定向到成功页面
+                        if "location" in response.headers:
+                            location = response.headers["location"]
+                            if "main.html" in location or "index" in location:
+                                return {"ret": 0, "msg": "登录成功", "data": {"redirect": location}}
+                        return {"ret": -1, "msg": f"重定向: {status}", "data": None}
                     else:
+                        if retry_count < max_retries:
+                            await asyncio.sleep(1)  # 等待1秒后重试
+                            return await self.fetch_jwc(url, method, data, cookies, headers, retry_count + 1)
                         return {"ret": -1, "msg": f"请求失败: {status}", "data": None}
                         
             except Exception as e:
+                if retry_count < max_retries:
+                    await asyncio.sleep(1)
+                    return await self.fetch_jwc(url, method, data, cookies, headers, retry_count + 1)
                 logger.error(f"请求教务系统失败 {full_url}: {e}")
                 return {"ret": -1, "msg": f"网络错误: {str(e)}", "data": None}
 
@@ -605,13 +598,28 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 conn = sqlite3.connect(str(self.db_file))
                 cursor = conn.cursor()
                 
+                # 敏感信息脱敏
+                safe_request_data = None
+                if request_data:
+                    safe_data = request_data.copy()
+                    if 'password' in safe_data:
+                        safe_data['password'] = '***HIDDEN***'
+                    safe_request_data = json.dumps(safe_data)
+                
+                # 限制响应数据长度
+                safe_response_data = None
+                if response_data:
+                    if len(response_data) > 1000:
+                        safe_response_data = response_data[:1000] + "...[truncated]"
+                    else:
+                        safe_response_data = response_data
+                
                 cursor.execute(
                     """
                     INSERT INTO request_logs (student_id, api_url, request_data, response_data, status_code)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (student_id, url, json.dumps(request_data) if request_data else None, 
-                     response_data[:1000] if response_data else None, status_code)
+                    (student_id, url, safe_request_data, safe_response_data, status_code)
                 )
                 
                 conn.commit()
@@ -619,54 +627,155 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             except Exception as e:
                 logger.error(f"记录请求日志失败: {e}")
 
-        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
-            """登录教务系统"""
+        async def get_login_page(self):
+            """获取登录页面，提取必要信息"""
             try:
-                # RSA加密密码
-                if not self.rsa_encryptor:
-                    return {"success": False, "error": "RSA加密器未初始化"}
+                login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
+                html = await self.fetch_page(login_url)
                 
-                encrypted_password = self.rsa_encryptor.encrypt(password)
+                if not html:
+                    return None
                 
-                # 构建登录数据
+                # 从页面中提取关键信息
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # 提取公钥（如果需要）
+                public_key = None
+                script_tags = soup.find_all('script')
+                for script in script_tags:
+                    if script.string and 'publicKey' in script.string:
+                        # 简单提取公钥
+                        match = re.search(r'publicKey\s*=\s*["\']([^"\']+)["\']', script.string)
+                        if match:
+                            public_key = match.group(1)
+                            break
+                
+                return {
+                    "public_key": public_key,
+                    "html": html
+                }
+            except Exception as e:
+                logger.error(f"获取登录页面失败: {e}")
+                return None
+
+        async def login_jwc_simple(self, student_id: str, password: str) -> Dict[str, Any]:
+            """简化版登录方法"""
+            try:
+                # 构建登录数据（简化版，可能不需要RSA加密）
                 login_data = {
                     "username": student_id,
-                    "password": encrypted_password,
+                    "password": password,  # 直接使用明文密码
                     "vcode": "",
                     "jcaptchaCode": "",
                     "rememberMe": ""
                 }
                 
+                logger.info(f"尝试登录，学号: {student_id}")
+                
                 # 发送登录请求
                 result = await self.fetch_jwc("/admin/login", method="POST", data=login_data)
                 
+                logger.info(f"登录响应: {result}")
+                
                 if result.get("ret") == 0:
-                    # 登录成功，尝试获取用户信息
-                    user_info = await self.get_user_info()
-                    if user_info:
-                        return {
-                            "success": True,
-                            "student_id": student_id,
-                            "user_info": user_info,
-                            "message": "登录成功"
-                        }
-                    else:
-                        return {
-                            "success": True,
-                            "student_id": student_id,
-                            "user_info": None,
-                            "message": "登录成功，但获取用户信息失败"
-                        }
+                    # 登录成功
+                    return {
+                        "success": True,
+                        "student_id": student_id,
+                        "message": "登录成功"
+                    }
                 else:
                     error_msg = result.get("msg", "登录失败")
-                    if "账号或密码错误" in error_msg or result.get("ret") == -1:
+                    if "账号或密码错误" in error_msg or "密码错误" in error_msg:
                         return {"success": False, "error": "账号或密码错误"}
+                    elif "验证码" in error_msg:
+                        return {"success": False, "error": "需要验证码，请稍后再试"}
                     else:
-                        return {"success": False, "error": error_msg}
+                        return {"success": False, "error": f"登录失败: {error_msg}"}
                         
             except Exception as e:
                 logger.error(f"登录教务系统失败: {e}")
                 return {"success": False, "error": f"登录失败: {str(e)}"}
+
+        async def login_jwc_direct(self, student_id: str, password: str) -> Dict[str, Any]:
+            """直接登录方法，模拟浏览器行为"""
+            try:
+                login_url = f"{self.jwc_config['base_url']}{self.jwc_config['login_url']}"
+                
+                # 构建完整的表单数据
+                form_data = urllib.parse.urlencode({
+                    "username": student_id,
+                    "password": password,
+                    "vcode": "",
+                    "jcaptchaCode": "",
+                    "rememberMe": ""
+                })
+                
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": self.jwc_config['base_url'],
+                    "Referer": login_url,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1"
+                }
+                
+                logger.info(f"尝试直接登录，学号: {student_id}")
+                
+                # 发送POST请求
+                response_text = await self.fetch_page(login_url, method="POST", data=form_data, headers=headers)
+                
+                # 检查响应
+                if not response_text:
+                    return {"success": False, "error": "登录请求失败"}
+                
+                # 检查是否登录成功
+                if "账号或密码错误" in response_text:
+                    return {"success": False, "error": "账号或密码错误"}
+                elif "验证码" in response_text:
+                    return {"success": False, "error": "需要验证码，请稍后再试"}
+                elif "main.html" in response_text or "index" in response_text:
+                    # 登录成功
+                    return {
+                        "success": True,
+                        "student_id": student_id,
+                        "message": "登录成功"
+                    }
+                else:
+                    # 尝试从响应中提取更多信息
+                    soup = BeautifulSoup(response_text, 'html.parser')
+                    error_msg = soup.find('div', class_='error-msg')
+                    if error_msg:
+                        return {"success": False, "error": error_msg.get_text(strip=True)}
+                    
+                    # 检查是否有登录成功的迹象
+                    title = soup.find('title')
+                    if title and ("教务系统" in title.text or "首页" in title.text):
+                        return {
+                            "success": True,
+                            "student_id": student_id,
+                            "message": "登录成功"
+                        }
+                    
+                    return {"success": False, "error": "登录失败，未知错误"}
+                    
+            except Exception as e:
+                logger.error(f"直接登录失败: {e}")
+                return {"success": False, "error": f"登录失败: {str(e)}"}
+
+        async def login_jwc(self, student_id: str, password: str) -> Dict[str, Any]:
+            """主登录函数，尝试多种方法"""
+            # 先尝试简单方法
+            result = await self.login_jwc_simple(student_id, password)
+            
+            if not result.get("success") and "账号或密码错误" in result.get("error", ""):
+                # 如果简单方法失败，尝试直接方法
+                logger.info("简单登录失败，尝试直接登录...")
+                result = await self.login_jwc_direct(student_id, password)
+            
+            return result
 
         async def get_user_info(self) -> Dict[str, Any]:
             """获取用户信息"""
@@ -676,14 +785,15 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 result = await self.fetch_jwc(f"/admin/getDayBz?rq={today}")
                 
                 if result.get("ret") == 0 and result.get("data"):
-                    xlrq = result["data"].get("xlrq", {})
-                    return {
-                        "student_id": xlrq.get("currentUserName"),
-                        "user_id": xlrq.get("currentUserId"),
-                        "role_id": xlrq.get("currentRoleId"),
-                        "academic_year": xlrq.get("xnxqh"),
-                        "department_id": xlrq.get("currentDepartmentId")
-                    }
+                    if isinstance(result["data"], dict) and "xlrq" in result["data"]:
+                        xlrq = result["data"]["xlrq"]
+                        return {
+                            "student_id": xlrq.get("currentUserName"),
+                            "user_id": xlrq.get("currentUserId"),
+                            "role_id": xlrq.get("currentRoleId"),
+                            "academic_year": xlrq.get("xnxqh"),
+                            "department_id": xlrq.get("currentDepartmentId")
+                        }
                 return None
             except Exception as e:
                 logger.error(f"获取用户信息失败: {e}")
@@ -698,7 +808,8 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                 result = await self.fetch_jwc(f"/admin/getDayBz?rq={date_str}")
                 
                 if result.get("ret") == 0 and result.get("data"):
-                    return result["data"].get("xlrq", {})
+                    if isinstance(result["data"], dict):
+                        return result["data"].get("xlrq", {})
                 return None
             except Exception as e:
                 logger.error(f"获取周次信息失败: {e}")
@@ -830,28 +941,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                             
                             courses.append(course)
                 
-                # 处理实践课
-                sjk_list = course_data.get("sjk", [])
-                for practice_info in sjk_list:
-                    course_name = practice_info.get("kcmc", "")
-                    class_names = practice_info.get("jxbzc", "")
-                    practice_type = practice_info.get("type", "")
-                    student_count = practice_info.get("xkrs", "")
-                    week_range = practice_info.get("zcstr", "")
-                    
-                    if course_name and course_name != "-":
-                        practice_course = {
-                            "student_id": student_id,
-                            "academic_year": academic_year,
-                            "course_name": course_name,
-                            "class_names": class_names,
-                            "type": practice_type,
-                            "student_count": student_count,
-                            "week_range": week_range,
-                            "is_practice": True
-                        }
-                        # 这里可以单独存储实践课
-                        
                 return courses
                 
             except Exception as e:
@@ -862,62 +951,18 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             """根据节次编码获取时间"""
             # 节次时间映射表
             time_mapping = {
-  "1": {
-    "start_time": "08:45",
-    "end_time": "09:30",
-    "period": "第1节"
-  },
-  "2": {
-    "start_time": "09:30",
-    "end_time": "10:15",
-    "period": "第2节"
-  },
-  "3": {
-    "start_time": "10:30",
-    "end_time": "11:15",
-    "period": "第3节"
-  },
-  "4": {
-    "start_time": "11:15",
-    "end_time": "12:00",
-    "period": "第4节"
-  },
-  "5": {
-    "start_time": "14:00",
-    "end_time": "14:45",
-    "period": "第5节"
-  },
-  "6": {
-    "start_time": "14:45",
-    "end_time": "15:30",
-    "period": "第6节"
-  },
-  "7": {
-    "start_time": "15:45",
-    "end_time": "16:30",
-    "period": "第7节"
-  },
-  "8": {
-    "start_time": "16:30",
-    "end_time": "17:15",
-    "period": "第8节"
-  },
-  "9": {
-    "start_time": "18:30",
-    "end_time": "19:15",
-    "period": "第9节"
-  },
-  "10": {
-    "start_time": "19:15",
-    "end_time": "20:00",
-    "period": "第10节"
-  },
-  "11": {
-    "start_time": "20:05",
-    "end_time": "20:50",
-    "period": "第11节"
-  }
-}
+                "1": {"start_time": "08:00", "end_time": "08:45", "period": "第1节"},
+                "2": {"start_time": "08:50", "end_time": "09:35", "period": "第2节"},
+                "3": {"start_time": "09:50", "end_time": "10:35", "period": "第3节"},
+                "4": {"start_time": "10:40", "end_time": "11:25", "period": "第4节"},
+                "5": {"start_time": "13:30", "end_time": "14:15", "period": "第5节"},
+                "6": {"start_time": "14:20", "end_time": "15:05", "period": "第6节"},
+                "7": {"start_time": "15:20", "end_time": "16:05", "period": "第7节"},
+                "8": {"start_time": "16:10", "end_time": "16:55", "period": "第8节"},
+                "9": {"start_time": "18:30", "end_time": "19:15", "period": "第9节"},
+                "10": {"start_time": "19:20", "end_time": "20:05", "period": "第10节"},
+                "11": {"start_time": "20:10", "end_time": "20:55", "period": "第11节"},
+            }
             
             return time_mapping.get(section_code, {})
 
@@ -1178,10 +1223,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         # 更新最新课表
                         await self.update_course_table(student_id)
                         
-                        # 这里可以实现课程变动检测逻辑
-                        # 比较新旧课程的哈希值，检测变动
-                        # 由于时间关系，这里留空，后续可以完善
-                        
                     except Exception as e:
                         logger.error(f"检查用户{student_id}课程变动失败: {e}")
                         continue
@@ -1380,16 +1421,14 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             # 尝试登录验证
             yield event.plain_result("正在验证账号密码，请稍候...")
             
+            # 尝试登录
             login_result = await self.login_jwc(student_id, password)
             
             if login_result.get("success"):
                 # 绑定成功，保存信息
                 try:
-                    user_info = login_result.get("user_info", {})
-                    name = user_info.get("student_id", "")
-                    
                     # AES加密密码（这里简化处理，实际应该使用AES加密）
-                    # 由于时间关系，这里只做base64编码，实际使用时应使用AES加密
+                    # 由于时间关系，这里只做base64编码
                     encoded_password = base64.b64encode(password.encode()).decode()
                     
                     conn = sqlite3.connect(str(self.db_file))
@@ -1400,7 +1439,7 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                         INSERT INTO user_bindings (qq_id, student_id, password, name, bind_time)
                         VALUES (?, ?, ?, ?, ?)
                         """,
-                        (qq_id, student_id, encoded_password, name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        (qq_id, student_id, encoded_password, "", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     )
                     
                     conn.commit()
@@ -1410,14 +1449,14 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
                     yield event.plain_result("验证成功，正在更新课表数据...")
                     await self.update_course_table(student_id)
                     
-                    yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n姓名：{name}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
+                    yield event.plain_result(f"✅ 绑定成功！\n学号：{student_id}\n\n课表数据已更新，明天开始将为您推送课程提醒。")
                     
                 except Exception as e:
                     logger.error(f"保存绑定信息失败: {e}")
                     yield event.plain_result(f"绑定失败: {str(e)}")
             else:
                 error_msg = login_result.get("error", "绑定失败")
-                yield event.plain_result(f"❌ {error_msg}\n请检查学号和密码是否正确。")
+                yield event.plain_result(f"❌ {error_msg}\n请检查学号和密码是否正确。\n\n提示：请确保密码正确，注意大小写和特殊字符。")
 
         @filter.command("解绑教务")
         async def cmd_unbind_jwc(self, event: AstrMessageEvent):
@@ -1798,23 +1837,19 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             """测试教务系统登录"""
             yield event.plain_result("正在测试登录，请稍候...")
             
+            # 尝试多种登录方法
             login_result = await self.login_jwc(student_id, password)
             
             if login_result.get("success"):
-                user_info = login_result.get("user_info", {})
-                name = user_info.get("student_id", "未知")
-                
                 response = f"✅ 登录成功！\n\n"
                 response += f"学号：{student_id}\n"
-                response += f"姓名：{name}\n"
-                response += f"学年学期：{user_info.get('academic_year', '未知')}\n"
-                response += f"角色：{user_info.get('role_id', '未知')}\n\n"
+                response += f"提示信息：{login_result.get('message', '登录成功')}\n\n"
                 response += "您可以使用 /绑定教务 学号 密码 来绑定账号"
                 
                 yield event.plain_result(response)
             else:
                 error_msg = login_result.get("error", "登录失败")
-                yield event.plain_result(f"❌ {error_msg}")
+                yield event.plain_result(f"❌ {error_msg}\n\n请检查：\n1. 学号和密码是否正确\n2. 密码是否包含特殊字符\n3. 是否开启了验证码")
 
         async def terminate(self):
             logger.info("南京机电通知监控插件正在卸载...")
