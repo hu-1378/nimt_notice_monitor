@@ -6,41 +6,43 @@ import json
 import hashlib
 import asyncio
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 import aiohttp
 from bs4 import BeautifulSoup
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.config import AstrBotConfig
-
 
 @register(
     "nimt_notice_monitor",
     "AstrBot",
     "南京机电职业技术学院通知监控插件",
-    "2.0.0"
+    "2.0.1"
 )
 class NJIMTNoticeMonitor(Star):
     """南京机电通知监控插件"""
 
-    def __init__(self, context: Context, config: AstrBotConfig):
+    def __init__(self, context: Context):
         super().__init__(context)
-        self.config = config
 
-        # 数据存储路径
+        # 获取插件数据目录
         self.data_dir = Path("data/plugin_data/nimt_notice_monitor")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # 数据库文件
         self.db_file = self.data_dir / "notices.db"
 
-        # 初始化配置
-        self.sites_config = self.load_config("sites_config")
-        self.push_targets = self.load_config("push_targets")
+        # 配置文件
+        self.config_file = self.data_dir / "config.json"
+
+        # 加载配置
+        self.config = self.load_config()
+        self.sites_config = self.config.get("sites_config", [])
+        self.push_targets = self.config.get("push_targets", {"users": [], "groups": []})
         self.check_interval = self.config.get("check_interval", 180)
 
         # 初始化数据库
@@ -51,17 +53,9 @@ class NJIMTNoticeMonitor(Star):
 
         logger.info("南京机电通知监控插件初始化完成")
 
-    def load_config(self, key: str) -> Any:
-        """加载配置"""
-        try:
-            config_str = self.config.get(key, "")
-            if config_str:
-                return json.loads(config_str)
-        except json.JSONDecodeError as e:
-            logger.error(f"配置解析失败 {key}: {e}")
-
-        # 返回默认值
-        defaults = {
+    def load_config(self) -> Dict[str, Any]:
+        """加载配置文件"""
+        default_config = {
             "sites_config": [
                 {
                     "id": "nimt_main",
@@ -75,22 +69,38 @@ class NJIMTNoticeMonitor(Star):
             "push_targets": {
                 "users": [],
                 "groups": []
-            }
+            },
+            "check_interval": 180
         }
-        return defaults.get(key, {})
 
-    def save_config(self, key: str, value: Any):
-        """保存配置"""
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"加载配置文件失败: {e}")
+
+        # 保存默认配置
+        self.save_config(default_config)
+        return default_config
+
+    def save_config(self, config: Dict[str, Any] = None):
+        """保存配置文件"""
+        if config is None:
+            config = self.config
+
         try:
-            self.config[key] = json.dumps(value, ensure_ascii=False, indent=2)
-            self.config.save_config()
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            self.config = config
+            self.sites_config = config.get("sites_config", [])
+            self.push_targets = config.get("push_targets", {"users": [], "groups": []})
+            self.check_interval = config.get("check_interval", 180)
         except Exception as e:
-            logger.error(f"保存配置失败 {key}: {e}")
+            logger.error(f"保存配置文件失败: {e}")
 
     def init_database(self):
         """初始化数据库"""
-        import sqlite3
-
         try:
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
@@ -125,18 +135,22 @@ class NJIMTNoticeMonitor(Star):
 
     def start_scheduler(self):
         """启动定时任务"""
-        from astrbot.utils.schedule import scheduler
-
-        # 移除可能存在的旧任务
         try:
-            scheduler.remove_job('nimt_check_notices')
-        except:
-            pass
+            from astrbot.utils.schedule import scheduler
 
-        # 添加新任务
-        @scheduler.scheduled_job('interval', minutes=self.check_interval, id='nimt_check_notices')
-        async def scheduled_check():
-            await self.check_all_sites_task()
+            # 移除可能存在的旧任务
+            try:
+                scheduler.remove_job('nimt_check_notices')
+            except:
+                pass
+
+            # 添加新任务
+            @scheduler.scheduled_job('interval', minutes=self.check_interval, id='nimt_check_notices')
+            async def scheduled_check():
+                await self.check_all_sites_task()
+
+        except ImportError:
+            logger.warning("未找到调度器，定时任务功能不可用")
 
     async def check_all_sites_task(self):
         """定时检查任务"""
@@ -164,7 +178,7 @@ class NJIMTNoticeMonitor(Star):
 
         try:
             async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as session:
                 async with session.get(url, headers=headers) as response:
                     response.raise_for_status()
@@ -185,24 +199,34 @@ class NJIMTNoticeMonitor(Star):
             soup = BeautifulSoup(html, 'html.parser')
             notices = []
 
+            # 查找通知列表
+            list_container = None
+
             # 尝试多种选择器
-            list_selectors = [
+            selectors = [
                 'ul.news_list',
                 'ul.wp_list',
                 'div.news_list ul',
                 'div.list ul',
-                'div.article-list ul'
+                'div.article-list ul',
+                'ul.list-paddingleft-2'
             ]
 
-            list_container = None
-            for selector in list_selectors:
+            for selector in selectors:
                 list_container = soup.select_one(selector)
                 if list_container:
                     break
 
             if not list_container:
-                logger.warning(f"未找到通知列表容器: {site_config['name']}")
-                return notices
+                # 尝试直接查找包含news类的列表项
+                news_items = soup.find_all('li', class_=re.compile('news'))
+                if news_items:
+                    list_container = soup.new_tag('div')
+                    for item in news_items:
+                        list_container.append(item)
+                else:
+                    logger.warning(f"未找到通知列表容器: {site_config['name']}")
+                    return notices
 
             # 解析每个通知项
             items = list_container.find_all('li')
@@ -234,10 +258,14 @@ class NJIMTNoticeMonitor(Star):
                     for elem in date_elems:
                         text = elem.get_text(strip=True)
                         # 匹配日期格式
-                        date_match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', text)
+                        date_match = re.search(r'(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?)', text)
                         if date_match:
-                            publish_date = date_match.group(1)
-                            publish_date = re.sub(r'[/]', '-', publish_date)
+                            date_str = date_match.group(1)
+                            # 清理日期格式
+                            date_str = re.sub(r'[年月]', '-', date_str)
+                            date_str = re.sub(r'[日]', '', date_str)
+                            date_str = re.sub(r'/', '-', date_str)
+                            publish_date = date_str
                             break
 
                     # 生成唯一ID
@@ -274,7 +302,6 @@ class NJIMTNoticeMonitor(Star):
             notices = self.parse_notices(html, site_config)
 
             # 检查是否有新通知
-            import sqlite3
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
 
@@ -362,7 +389,6 @@ class NJIMTNoticeMonitor(Star):
                     logger.error(f"推送群组 {group_id} 失败: {e}")
 
             # 标记为已推送
-            import sqlite3
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
             cursor.execute(
@@ -386,7 +412,6 @@ class NJIMTNoticeMonitor(Star):
             # 计算3天前的日期
             three_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
 
-            import sqlite3
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
 
@@ -405,7 +430,7 @@ class NJIMTNoticeMonitor(Star):
             conn.close()
 
             if not notices:
-                yield event.plain_result("最近3天没有通知")
+                yield event.reply("最近3天没有通知")
                 return
 
             # 构建响应消息
@@ -427,16 +452,20 @@ class NJIMTNoticeMonitor(Star):
                     response += "\n... 更多通知请查看网站"
                     break
 
-            yield event.plain_result(response)
+            yield event.reply(response)
 
         except Exception as e:
             logger.error(f"查看通知失败: {e}")
-            yield event.plain_result(f"查询失败: {str(e)}")
+            yield event.reply(f"查询失败: {str(e)}")
 
-    @filter.command("添加网站")
+    @filter.command_group("nimt")
+    async def nimt_group(self):
+        """南京机电通知监控插件管理命令组"""
+        pass
+
+    @nimt_group.command("添加网站")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def cmd_add_site(self, event: AstrMessageEvent, site_id: str, name: str, url: str, base_url: str,
-                           *remark_parts):
+    async def cmd_add_site(self, event: AstrMessageEvent, site_id: str, name: str, url: str, base_url: str, *remark_parts):
         """添加监控网站
 
         参数:
@@ -453,7 +482,7 @@ class NJIMTNoticeMonitor(Star):
             # 检查是否已存在
             for site in self.sites_config:
                 if site["id"] == site_id:
-                    yield event.plain_result(f"网站ID '{site_id}' 已存在")
+                    yield event.reply(f"网站ID '{site_id}' 已存在")
                     return
 
             # 添加新网站配置
@@ -467,15 +496,16 @@ class NJIMTNoticeMonitor(Star):
             }
 
             self.sites_config.append(new_site)
-            self.save_config("sites_config", self.sites_config)
+            self.config["sites_config"] = self.sites_config
+            self.save_config()
 
-            yield event.plain_result(f"✅ 已添加网站：{name}")
+            yield event.reply(f"✅ 已添加网站：{name}")
 
         except Exception as e:
             logger.error(f"添加网站失败: {e}")
-            yield event.plain_result(f"添加失败: {str(e)}")
+            yield event.reply(f"添加失败: {str(e)}")
 
-    @filter.command("删除网站")
+    @nimt_group.command("删除网站")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_delete_site(self, event: AstrMessageEvent, site_id: str):
         """删除监控网站
@@ -488,25 +518,25 @@ class NJIMTNoticeMonitor(Star):
             new_config = [s for s in self.sites_config if s["id"] != site_id]
 
             if len(new_config) == len(self.sites_config):
-                yield event.plain_result(f"未找到网站ID '{site_id}'")
+                yield event.reply(f"未找到网站ID '{site_id}'")
                 return
 
             self.sites_config = new_config
-            self.save_config("sites_config", self.sites_config)
+            self.config["sites_config"] = self.sites_config
+            self.save_config()
 
-            yield event.plain_result(f"✅ 已删除网站：{site_id}")
+            yield event.reply(f"✅ 已删除网站：{site_id}")
 
         except Exception as e:
             logger.error(f"删除网站失败: {e}")
-            yield event.plain_result(f"删除失败: {str(e)}")
+            yield event.reply(f"删除失败: {str(e)}")
 
-    @filter.command("网站列表")
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @nimt_group.command("网站列表")
     async def cmd_list_sites(self, event: AstrMessageEvent):
         """查看所有监控网站"""
         try:
             if not self.sites_config:
-                yield event.plain_result("暂无监控网站")
+                yield event.reply("暂无监控网站")
                 return
 
             response = "📊 监控网站列表\n\n"
@@ -517,13 +547,13 @@ class NJIMTNoticeMonitor(Star):
                 response += f"   ID: {site['id']}\n"
                 response += f"   URL: {site['url']}\n\n"
 
-            yield event.plain_result(response)
+            yield event.reply(response)
 
         except Exception as e:
             logger.error(f"列出网站失败: {e}")
-            yield event.plain_result(f"查询失败: {str(e)}")
+            yield event.reply(f"查询失败: {str(e)}")
 
-    @filter.command("添加推送用户")
+    @nimt_group.command("添加推送用户")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_add_push_user(self, event: AstrMessageEvent, user_id: str):
         """添加推送用户
@@ -534,16 +564,17 @@ class NJIMTNoticeMonitor(Star):
         try:
             if user_id not in self.push_targets["users"]:
                 self.push_targets["users"].append(user_id)
-                self.save_config("push_targets", self.push_targets)
-                yield event.plain_result(f"✅ 已添加推送用户：{user_id}")
+                self.config["push_targets"] = self.push_targets
+                self.save_config()
+                yield event.reply(f"✅ 已添加推送用户：{user_id}")
             else:
-                yield event.plain_result("⚠️ 该用户已在推送列表中")
+                yield event.reply("⚠️ 该用户已在推送列表中")
 
         except Exception as e:
             logger.error(f"添加推送用户失败: {e}")
-            yield event.plain_result(f"添加失败: {str(e)}")
+            yield event.reply(f"添加失败: {str(e)}")
 
-    @filter.command("添加推送群组")
+    @nimt_group.command("添加推送群组")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_add_push_group(self, event: AstrMessageEvent, group_id: str):
         """添加推送群组
@@ -554,16 +585,17 @@ class NJIMTNoticeMonitor(Star):
         try:
             if group_id not in self.push_targets["groups"]:
                 self.push_targets["groups"].append(group_id)
-                self.save_config("push_targets", self.push_targets)
-                yield event.plain_result(f"✅ 已添加推送群组：{group_id}")
+                self.config["push_targets"] = self.push_targets
+                self.save_config()
+                yield event.reply(f"✅ 已添加推送群组：{group_id}")
             else:
-                yield event.plain_result("⚠️ 该群组已在推送列表中")
+                yield event.reply("⚠️ 该群组已在推送列表中")
 
         except Exception as e:
             logger.error(f"添加推送群组失败: {e}")
-            yield event.plain_result(f"添加失败: {str(e)}")
+            yield event.reply(f"添加失败: {str(e)}")
 
-    @filter.command("推送列表")
+    @nimt_group.command("推送列表")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_list_push_targets(self, event: AstrMessageEvent):
         """查看推送目标"""
@@ -584,17 +616,17 @@ class NJIMTNoticeMonitor(Star):
             else:
                 response += "  暂无推送群组\n"
 
-            yield event.plain_result(response)
+            yield event.reply(response)
 
         except Exception as e:
             logger.error(f"列出推送目标失败: {e}")
-            yield event.plain_result(f"查询失败: {str(e)}")
+            yield event.reply(f"查询失败: {str(e)}")
 
-    @filter.command("检查通知")
+    @nimt_group.command("检查通知")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_check_notices(self, event: AstrMessageEvent):
         """手动检查新通知"""
-        yield event.plain_result("开始检查新通知，请稍候...")
+        yield event.reply("开始检查新通知，请稍候...")
 
         try:
             new_notices = await self.check_all_sites()
@@ -610,26 +642,25 @@ class NJIMTNoticeMonitor(Star):
                     response += f"... 还有 {len(new_notices) - 5} 条未显示\n"
 
                 response += "正在推送..."
-                yield event.plain_result(response)
+                yield event.reply(response)
 
                 # 推送新通知
                 for notice in new_notices:
                     await self.send_notice_push(notice)
 
-                yield event.plain_result("✅ 推送完成")
+                yield event.reply("✅ 推送完成")
             else:
-                yield event.plain_result("未发现新通知")
+                yield event.reply("未发现新通知")
 
         except Exception as e:
             logger.error(f"手动检查失败: {e}")
-            yield event.plain_result(f"检查失败: {str(e)}")
+            yield event.reply(f"检查失败: {str(e)}")
 
-    @filter.command("通知统计")
+    @nimt_group.command("通知统计")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_notice_stats(self, event: AstrMessageEvent):
         """查看通知统计"""
         try:
-            import sqlite3
             conn = sqlite3.connect(str(self.db_file))
             cursor = conn.cursor()
 
@@ -670,11 +701,102 @@ class NJIMTNoticeMonitor(Star):
 
                 response += f"  {site_name}: {count} 条\n"
 
-            yield event.plain_result(response)
+            yield event.reply(response)
 
         except Exception as e:
             logger.error(f"查询统计失败: {e}")
-            yield event.plain_result(f"查询失败: {str(e)}")
+            yield event.reply(f"查询失败: {str(e)}")
+
+    @nimt_group.command("手动推送")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_manual_push(self, event: AstrMessageEvent, days: int = 1):
+        """手动推送最近N天的通知
+
+        参数:
+        days: 推送最近几天的通知（默认1天）
+        """
+        try:
+            # 计算日期
+            target_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+            conn = sqlite3.connect(str(self.db_file))
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT n.title, n.publish_date, n.url, s.name
+                FROM notices n
+                LEFT JOIN (
+                    SELECT id, name FROM (
+                        SELECT json_extract(value, '$.id') as id,
+                               json_extract(value, '$.name') as name
+                        FROM json_each(?)
+                    ) as sites
+                ) s ON n.site_id = s.id
+                WHERE n.publish_date >= ? AND n.notified = 0
+                ORDER BY n.publish_date DESC
+                LIMIT 10
+                """,
+                (json.dumps(self.sites_config), target_date)
+            )
+
+            notices = cursor.fetchall()
+            conn.close()
+
+            if not notices:
+                yield event.reply(f"最近{days}天没有未推送的通知")
+                return
+
+            response = f"📤 开始推送最近{days}天的通知...\n"
+            response += f"找到 {len(notices)} 条未推送通知\n\n"
+
+            for title, pub_date, url, site_name in notices[:3]:
+                response += f"📌 {title}\n"
+                response += f"   📅 {pub_date} | 🏫 {site_name or '未知'}\n\n"
+
+            if len(notices) > 3:
+                response += f"... 还有 {len(notices) - 3} 条\n\n"
+
+            response += "开始推送..."
+            yield event.reply(response)
+
+            # 推送通知
+            count = 0
+            for title, pub_date, url, site_name in notices:
+                notice = {
+                    "title": title,
+                    "publish_date": pub_date,
+                    "url": url,
+                    "site_name": site_name or "未知网站",
+                    "remark": ""
+                }
+                await self.send_notice_push(notice)
+                count += 1
+
+            yield event.reply(f"✅ 已推送 {count} 条通知")
+
+        except Exception as e:
+            logger.error(f"手动推送失败: {e}")
+            yield event.reply(f"推送失败: {str(e)}")
+
+    @nimt_group.command("清空数据")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_clear_data(self, event: AstrMessageEvent):
+        """清空通知数据库"""
+        try:
+            conn = sqlite3.connect(str(self.db_file))
+            cursor = conn.cursor()
+
+            cursor.execute("DELETE FROM notices")
+
+            conn.commit()
+            conn.close()
+
+            yield event.reply("✅ 已清空通知数据库")
+
+        except Exception as e:
+            logger.error(f"清空数据失败: {e}")
+            yield event.reply(f"清空失败: {str(e)}")
 
     async def terminate(self):
         """插件卸载时调用"""
