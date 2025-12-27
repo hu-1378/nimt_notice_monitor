@@ -42,6 +42,18 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
         "2.1.0"
     )
     class NJIMTNoticeMonitor(Star):
+        class RSAEncryptor:
+            """RSA加密器"""
+            def __init__(self, public_key: str):
+                self.public_key = public_key
+                self.rsa_key = RSA.import_key(base64.b64decode(public_key))
+                self.cipher = PKCS1_v1_5.new(self.rsa_key)
+
+            def encrypt(self, plaintext: str) -> str:
+                """加密文本"""
+                encrypted = self.cipher.encrypt(plaintext.encode())
+                return base64.b64encode(encrypted).decode()
+
         def __init__(self, context: Context):
             super().__init__(context)
 
@@ -82,7 +94,10 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             try:
                 public_key = self.jwc_config.get("public_key", "")
                 if public_key:
-                    self.rsa_encryptor = RSAEncryptor(public_key)
+                    self.rsa_encryptor = self.RSAEncryptor(public_key)
+                    logger.info("RSA加密器初始化成功")
+                else:
+                    logger.warning("未找到RSA公钥配置")
             except Exception as e:
                 logger.error(f"初始化RSA加密器失败: {e}")
 
@@ -545,18 +560,6 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
 
         # ==================== 新增教务系统功能 ====================
 
-        class RSAEncryptor:
-            """RSA加密器"""
-            def __init__(self, public_key: str):
-                self.public_key = public_key
-                self.rsa_key = RSA.import_key(base64.b64decode(public_key))
-                self.cipher = PKCS1_v1_5.new(self.rsa_key)
-
-            def encrypt(self, plaintext: str) -> str:
-                """加密文本"""
-                encrypted = self.cipher.encrypt(plaintext.encode())
-                return base64.b64encode(encrypted).decode()
-
         async def fetch_jwc(self, url: str, method: str = "GET", data: Dict = None, 
                            cookies: Dict = None, need_login: bool = False) -> Dict:
             """请求教务系统API"""
@@ -859,18 +862,62 @@ if HAS_DEPENDENCIES and HAS_ASTRBOT_API:
             """根据节次编码获取时间"""
             # 节次时间映射表
             time_mapping = {
-                "1": {"start_time": "08:00", "end_time": "08:45", "period": "第1节"},
-                "2": {"start_time": "08:50", "end_time": "09:35", "period": "第2节"},
-                "3": {"start_time": "09:50", "end_time": "10:35", "period": "第3节"},
-                "4": {"start_time": "10:40", "end_time": "11:25", "period": "第4节"},
-                "5": {"start_time": "13:30", "end_time": "14:15", "period": "第5节"},
-                "6": {"start_time": "14:20", "end_time": "15:05", "period": "第6节"},
-                "7": {"start_time": "15:20", "end_time": "16:05", "period": "第7节"},
-                "8": {"start_time": "16:10", "end_time": "16:55", "period": "第8节"},
-                "9": {"start_time": "18:30", "end_time": "19:15", "period": "第9节"},
-                "10": {"start_time": "19:20", "end_time": "20:05", "period": "第10节"},
-                "11": {"start_time": "20:10", "end_time": "20:55", "period": "第11节"},
-            }
+  "1": {
+    "start_time": "08:45",
+    "end_time": "09:30",
+    "period": "第1节"
+  },
+  "2": {
+    "start_time": "09:30",
+    "end_time": "10:15",
+    "period": "第2节"
+  },
+  "3": {
+    "start_time": "10:30",
+    "end_time": "11:15",
+    "period": "第3节"
+  },
+  "4": {
+    "start_time": "11:15",
+    "end_time": "12:00",
+    "period": "第4节"
+  },
+  "5": {
+    "start_time": "14:00",
+    "end_time": "14:45",
+    "period": "第5节"
+  },
+  "6": {
+    "start_time": "14:45",
+    "end_time": "15:30",
+    "period": "第6节"
+  },
+  "7": {
+    "start_time": "15:45",
+    "end_time": "16:30",
+    "period": "第7节"
+  },
+  "8": {
+    "start_time": "16:30",
+    "end_time": "17:15",
+    "period": "第8节"
+  },
+  "9": {
+    "start_time": "18:30",
+    "end_time": "19:15",
+    "period": "第9节"
+  },
+  "10": {
+    "start_time": "19:15",
+    "end_time": "20:00",
+    "period": "第10节"
+  },
+  "11": {
+    "start_time": "20:05",
+    "end_time": "20:50",
+    "period": "第11节"
+  }
+}
             
             return time_mapping.get(section_code, {})
 
