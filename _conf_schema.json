@@ -1,27 +1,80 @@
 {
   "sites_config": {
-    "description": "网站监控配置",
-    "type": "text",
-    "hint": "JSON格式的网站配置列表，每个网站包含id、name、url、base_url、remark等字段",
-    "default": "[{\"id\": \"nimt_main\", \"name\": \"南京机电职业技术学院\", \"url\": \"http://www.nimt.edu.cn/739/list.htm\", \"base_url\": \"http://www.nimt.edu.cn\", \"remark\": \"学校主站通知公告\", \"enabled\": true}]",
-    "editor_mode": true,
-    "editor_language": "json",
-    "editor_theme": "vs-dark"
+    "description": "监控网站配置",
+    "type": "list",
+    "hint": "配置需要监控的网站列表",
+    "items": {
+      "type": "object",
+      "items": {
+        "id": {
+          "description": "网站ID",
+          "type": "string"
+        },
+        "name": {
+          "description": "网站名称",
+          "type": "string"
+        },
+        "url": {
+          "description": "网站URL",
+          "type": "string"
+        },
+        "base_url": {
+          "description": "基础URL",
+          "type": "string"
+        },
+        "remark": {
+          "description": "备注",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "是否启用",
+          "type": "bool",
+          "default": true
+        },
+        "selector": {
+          "description": "CSS选择器",
+          "type": "string"
+        }
+      }
+    }
   },
   "push_targets": {
-    "description": "推送目标配置",
-    "type": "text",
-    "hint": "JSON格式的推送目标，包含users（用户列表）和groups（群组列表）",
-    "default": "{\"users\": [], \"groups\": []}",
-    "editor_mode": true,
-    "editor_language": "json",
-    "editor_theme": "vs-dark"
+    "description": "推送目标",
+    "type": "object",
+    "hint": "配置推送通知的用户和群组",
+    "items": {
+      "users": {
+        "description": "用户ID列表",
+        "type": "list",
+        "items": {
+          "type": "string"
+        }
+      },
+      "groups": {
+        "description": "群组ID列表",
+        "type": "list",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
   },
   "check_interval": {
-    "description": "检查间隔（分钟）",
+    "description": "检查间隔(秒)",
     "type": "int",
-    "hint": "定时检查新通知的时间间隔，单位为分钟",
-    "default": 180,
-    "min": 5
+    "default": 300,
+    "hint": "通知检查的时间间隔"
+  },
+  "enable_course_monitor": {
+    "description": "启用课程监控",
+    "type": "bool",
+    "default": false,
+    "hint": "是否启用课程变动监控"
+  },
+  "course_check_interval": {
+    "description": "课程检查间隔(秒)",
+    "type": "int",
+    "default": 3600,
+    "hint": "课程变动检查的时间间隔"
   }
 }
